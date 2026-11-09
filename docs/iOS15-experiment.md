@@ -56,13 +56,15 @@ Device: iPhone 6s Plus (`iPhone8,2`), iOS 15.8.8 (`19H422`), Dopamine rootless
 - Python regression suite: all 268 tests passed on the pre-PR rerun. Two
   earlier runs timed out in the slow-reset transport test at its 0.14-second
   initial-read deadline on the same Mac.
-- End-to-end mirroring is blocked by a Mac-side crash in
-  WiFiPeerToPeerOld.dylib on the OCLP MacBookPro10,1, macOS 26.7.2 (25G332).
-  Apple's iPhone Mirroring requires the T2 chip for device attestation
-  (https://oclp.dev/features/). No OCLP Mac has a T2; this is a hardware
-  limitation, not a bridge or resolver issue.
-- Remote-session handshake, screen output, input and notification delivery
-  are not verified. Wrong-build/UUID rejection has not been device-tested.
+- End-to-end mirroring connected on an OCLP MacBookPro10,1, macOS 26.7.2
+  (25G332), after two Mac-side changes:
+  - `media.dylib` repairs the stubbed `AWDLTrafficRegistrationServiceRemoteScreen`
+    export from OCLP's WiFiPeerToPeer wrapper. Without it, iPhone Mirroring
+    crashes in `WiFiP2PTrafficRegistrationReservation initForService:` right
+    after unlock.
+  - `host.decoder_route` set to `no_fls`. With `auto`, H.264 decoder creation
+    fails with `-8969` and `avconferenced` terminates the session.
+- Notification delivery and wrong-build/UUID rejection have not been verified.
 
 Normal `make endpoint` does not enable this experiment. Rootless deployment
-path handling and the Mac-side crash are separate issues, not fixed here.
+path handling is a separate issue, not fixed here.

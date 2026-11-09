@@ -147,8 +147,37 @@ static NW_RETURNS_RETAINED id media_path(nw_endpoint_t endpoint, nw_parameters_t
 }
 INTERPOSE(media_path, nw_path_create_evaluator_for_endpoint)
 
+// OCLP's WiFiPeerToPeer wrapper exports AWDLTrafficRegistrationServiceRemoteScreen
+// as a stub function, while ScreenSharingKit reads it as an NSString constant.
+// Only the exact stub value is replaced; real NSString services pass through.
+// ponytail: RemoteScreen only; extend if another stubbed service is reached.
+static id (*originalReservationInit)(id, SEL, id);
+static const void *stubbedRemoteScreen;
+
+static id reservation_init(id self, SEL command, id service) {
+    if (stubbedRemoteScreen && (__bridge const void *)service == *(const void *const *)stubbedRemoteScreen) {
+        media_log("MIRRA_AWDL_SERVICE_REPAIRED service=RemoteScreen\n");
+        service = @"RemoteScreen";
+    }
+    return originalReservationInit(self, command, service);
+}
+
+static void repair_remote_screen_service(void) {
+    Dl_info info;
+    const void *symbol = dlsym(RTLD_DEFAULT, "AWDLTrafficRegistrationServiceRemoteScreen");
+    Class reservation = objc_getClass("WiFiP2PTrafficRegistrationReservation");
+    Method method = reservation ? class_getInstanceMethod(reservation, sel_registerName("initForService:")) : NULL;
+    // A function export lives in __TEXT; the stock data export is NSString *const.
+    static const unsigned char stub[] = {0x55, 0x48, 0x89, 0xe5, 0x31, 0xc0, 0x5d, 0xc3};
+    if (!symbol || !method || !dladdr(symbol, &info) || memcmp(symbol, stub, sizeof(stub))) return;
+    stubbedRemoteScreen = symbol;
+    originalReservationInit = (id (*)(id, SEL, id))method_setImplementation(method, (IMP)reservation_init);
+    media_log("MIRRA_AWDL_SERVICE_STUB_DETECTED image=%s\n", info.dli_fname);
+}
+
 __attribute__((constructor)) static void loaded(void) {
     @autoreleasepool {
+        repair_remote_screen_service();
         mediaEnabled = MirroringInstallMediaProfile();
         media_log("MIRRA_MEDIA_PROFILE_%s profile=%s\n", mediaEnabled ? "READY" : "UNSUPPORTED", MIRRA_MEDIA_PROFILE);
     }
