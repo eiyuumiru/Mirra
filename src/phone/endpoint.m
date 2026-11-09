@@ -83,10 +83,17 @@ static NSString *system_value(const char *name) {
     return sysctlbyname(name, value, &size, NULL, 0) == 0 ? [NSString stringWithUTF8String:value] : @"unavailable";
 }
 
+#ifdef MIRRA_EXPERIMENTAL_IOS15
+#include "ios15_symbols.h"
+#endif
+
 static void *required_symbol(void *library, const char *name,
                              NSMutableArray<NSString *> *missing,
                              void *(*resolve)(void *, const char *)) {
     void *symbol = library ? resolve(library, name) : NULL;
+#ifdef MIRRA_EXPERIMENTAL_IOS15
+    if (!symbol) symbol = ios15_symbol(name);
+#endif
     if (!symbol) [missing addObject:@(name)];
     return symbol;
 }
