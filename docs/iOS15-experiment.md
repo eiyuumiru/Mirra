@@ -56,9 +56,11 @@ Device: iPhone 6s Plus (`iPhone8,2`), iOS 15.8.8 (`19H422`), Dopamine rootless
 - Python regression suite: all 268 tests passed on the pre-PR rerun. Two
   earlier runs timed out in the slow-reset transport test at its 0.14-second
   initial-read deadline on the same Mac.
-- End-to-end mirroring remains blocked by a Mac-side crash involving
-  WiFiPeerToPeerOld.dylib on an OCLP MacBookPro10,1, macOS 26.7.2 (25G332).
-  The crash's cause is not established by this experiment.
+- End-to-end mirroring is blocked by a Mac-side crash in
+  WiFiPeerToPeerOld.dylib on the OCLP MacBookPro10,1, macOS 26.7.2 (25G332).
+  Apple's iPhone Mirroring requires the T2 chip for device attestation
+  (https://oclp.dev/features/). No OCLP Mac has a T2; this is a hardware
+  limitation, not a bridge or resolver issue.
 - Remote-session handshake, screen output, input and notification delivery
   are not verified. Wrong-build/UUID rejection has not been device-tested.
 
