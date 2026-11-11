@@ -86,5 +86,5 @@ static bool install_repair(Class target, const void *symbol) {
 
 bool MirraRepairAWDLService(void) {
     return install_repair(objc_getClass("WiFiP2PTrafficRegistrationReservation"),
-        dlsym(RTLD_DEFAULT, "_AWDLTrafficRegistrationServiceRemoteScreen"));
+        dlsym(RTLD_DEFAULT, "AWDLTrafficRegistrationServiceRemoteScreen"));
 }
