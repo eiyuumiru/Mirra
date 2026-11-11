@@ -129,6 +129,7 @@
     "src/mirroring/profile.h",
     "src/mirroring/profile.m",
     "src/mirroring/sockets.c",
+    "src/phone/cache-symbols.h",
     "src/phone/endpoint.m",
     "src/phone/keystore-symbols.h",
     "src/tools/capabilities.m",

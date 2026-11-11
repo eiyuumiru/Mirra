@@ -58,6 +58,7 @@ def build(sdk_mode='auto', output=None):
     report = {'build_method': mode, 'header_sdk': sdk, 'architecture': 'arm64',
         'minimum_ios': '15.0', 'source_sha256': hashlib.sha256(source.read_bytes()).hexdigest(),
         'symbol_map_sha256': hashlib.sha256((source.parent / 'keystore-symbols.h').read_bytes()).hexdigest(),
+        'cache_symbols_sha256': hashlib.sha256((source.parent / 'cache-symbols.h').read_bytes()).hexdigest(),
         'requires_backend_signing': True, 'device_compatibility_verified': False}
     with tempfile.TemporaryDirectory(prefix='endpoint-build-', dir=output.parent) as temporary:
         work = Path(temporary)

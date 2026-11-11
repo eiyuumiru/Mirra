@@ -8,19 +8,24 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/sysctl.h>
+#include <sys/mman.h>
+#include <limits.h>
 #include <CommonCrypto/CommonDigest.h>
-#if TARGET_OS_IPHONE && defined(__arm64__) && !defined(__arm64e__)
-#define KEYSTORE_MAPPED_TARGET 1
+#if TARGET_OS_IPHONE && defined(__arm64__)
+#define KEYSTORE_SYMBOL_TARGET 1
 #else
-#define KEYSTORE_MAPPED_TARGET 0
+#define KEYSTORE_SYMBOL_TARGET 0
 #endif
-#if KEYSTORE_MAPPED_TARGET || defined(MIRRA_SYMBOL_FIXTURES)
+#if KEYSTORE_SYMBOL_TARGET || defined(MIRRA_SYMBOL_FIXTURES)
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
 #include <mach/vm_prot.h>
 #include <stdbool.h>
 #include "keystore-symbols.h"
-
+#include "cache-symbols.h"
+#if __has_feature(ptrauth_calls)
+#include <ptrauth.h>
+#endif
 #endif
 
 // Experimental AKS endpoint over stdin/stdout (carried by authenticated SSH).
@@ -133,8 +138,16 @@ static NSString *process_architecture(void) {
 #endif
 }
 
+static const char *keystore_path(void) {
+#if TARGET_OS_IPHONE
+    return "/System/Library/PrivateFrameworks/AppleKeyStore.framework/AppleKeyStore";
+#else
+    return "/System/Library/PrivateFrameworks/AppleKeyStore.framework/Versions/A/AppleKeyStore";
+#endif
+}
+
 // Private symbol fallback contributed by @OiviaDesu in PR #4 (a193c167).
-#if KEYSTORE_MAPPED_TARGET || defined(MIRRA_SYMBOL_FIXTURES)
+#if KEYSTORE_SYMBOL_TARGET || defined(MIRRA_SYMBOL_FIXTURES)
 
 static bool symbol_map_supported(const char *build, const char *architecture) {
     return build && architecture && !strcmp(build, keystore_build) && !strcmp(architecture, "arm64");
@@ -161,22 +174,21 @@ static bool slid_address(uint64_t value, intptr_t slide, uintptr_t *result) {
 
 // Validate metadata separately from dyld lookup so malformed and mismatched
 // images can be checked on the host without calling any private function.
-static void *image_symbol(const void *bytes, size_t length, uintptr_t base,
-                          intptr_t slide, const MappedSymbol *symbol) {
-    if (!bytes || !symbol || length < sizeof(struct mach_header_64) ||
-        symbol->image >= sizeof(keystore_images) / sizeof(*keystore_images) ||
-        symbol->offset > UINTPTR_MAX - base) return NULL;
+static void *image_address(const void *bytes, size_t length, uintptr_t address,
+                           intptr_t slide, const unsigned char *expected_uuid,
+                           bool allow_arm64e, unsigned section_index) {
+    if (!bytes || length < sizeof(struct mach_header_64) || (address & 3)) return NULL;
     struct mach_header_64 header;
     memcpy(&header, bytes, sizeof(header));
+    cpu_subtype_t subtype = header.cpusubtype & ~CPU_SUBTYPE_MASK;
     if (header.magic != MH_MAGIC_64 || header.cputype != CPU_TYPE_ARM64 ||
-        (header.cpusubtype & ~CPU_SUBTYPE_MASK) != CPU_SUBTYPE_ARM64_ALL ||
+        (subtype != CPU_SUBTYPE_ARM64_ALL && !(allow_arm64e && subtype == CPU_SUBTYPE_ARM64E)) ||
         header.sizeofcmds > length - sizeof(header)) return NULL;
-    uintptr_t address = base + symbol->offset;
-    if (address & 3) return NULL;
     const unsigned char *cursor = (const unsigned char *)bytes + sizeof(header);
     size_t remaining = header.sizeofcmds;
     bool uuid_ok = false, text_ok = false;
     unsigned uuid_count = 0;
+    uint64_t sections = 0;
     for (uint32_t i = 0; i < header.ncmds; i++) {
         struct load_command command;
         if (remaining < sizeof(command)) return NULL;
@@ -187,7 +199,8 @@ static void *image_symbol(const void *bytes, size_t length, uintptr_t base,
             struct uuid_command uuid;
             if (command.cmdsize != sizeof(uuid) || ++uuid_count != 1) return NULL;
             memcpy(&uuid, cursor, sizeof(uuid));
-            uuid_ok = !memcmp(uuid.uuid, keystore_images[symbol->image].uuid, sizeof(uuid.uuid));
+            uuid_ok = expected_uuid ? !memcmp(uuid.uuid, expected_uuid, sizeof(uuid.uuid))
+                                    : cache_uuid_present(uuid.uuid);
         } else if (command.cmd == LC_SEGMENT_64) {
             struct segment_command_64 segment;
             if (command.cmdsize < sizeof(segment)) return NULL;
@@ -205,45 +218,310 @@ static void *image_symbol(const void *bytes, size_t length, uintptr_t base,
                         !strncmp(section.sectname, "__text", sizeof(section.sectname)) &&
                         (section.flags & S_ATTR_PURE_INSTRUCTIONS) &&
                         slid_address(section.addr, slide, &start) && address >= start &&
-                        section.size >= 4 && address - start <= section.size - 4) text_ok = true;
+                        section.size >= 4 && address - start <= section.size - 4 &&
+                        (!section_index || sections + s + 1 == section_index)) text_ok = true;
                 }
             }
+            sections += segment.nsects;
         }
         cursor += command.cmdsize;
         remaining -= command.cmdsize;
     }
     return remaining == 0 && uuid_ok && text_ok ? (void *)address : NULL;
 }
+
+static void *image_symbol(const void *bytes, size_t length, uintptr_t base,
+                          intptr_t slide, const MappedSymbol *symbol) {
+    if (!symbol || symbol->image >= sizeof(keystore_images) / sizeof(*keystore_images) ||
+        symbol->offset > UINTPTR_MAX - base) return NULL;
+    return image_address(bytes, length, base + symbol->offset, slide,
+                         keystore_images[symbol->image].uuid, false, 0);
+}
+
+typedef struct {
+    void *mapping;
+    size_t mapping_size;
+    CacheSymbols symbols;
+} CacheSymbolsFile;
+
+static inline void close_cache_symbols(CacheSymbolsFile *file) {
+    if (file->mapping) munmap(file->mapping, file->mapping_size);
+    *file = (CacheSymbolsFile){0};
+}
+
+static inline bool open_cache_symbols(const char *path, const unsigned char uuid[16],
+                                      const unsigned char magic[16], CacheSymbolsFile *output,
+                                      const char **error) {
+    *error = "cache_symbols_file_unavailable";
+    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+    if (fd < 0) return false;
+    struct stat info;
+    unsigned char bytes[CACHE_HEADER_BYTES];
+    CacheHeader header;
+    CacheSymbolsFile file = {0};
+    bool available = false;
+    do {
+        if (fstat(fd, &info) || !S_ISREG(info.st_mode) || info.st_size < CACHE_UUID_OFFSET + 16 ||
+            (info.st_uid != 0 && info.st_uid != getuid()) || (info.st_mode & 022)) break;
+        ssize_t size = pread(fd, bytes, sizeof(bytes), 0);
+        *error = "cache_symbols_header_invalid";
+        if (size < 0 || !cache_header(bytes, (size_t)size, &header) ||
+            !cache_range((size_t)info.st_size, 0, header.mapping_offset)) break;
+        *error = "cache_symbols_uuid_mismatch";
+        if (memcmp(header.uuid, uuid, 16) || memcmp(header.magic, magic, 16)) break;
+        *error = "cache_local_symbols_unavailable";
+        if (!header.symbols_offset || !header.symbols_size) break;
+        *error = "cache_local_symbols_invalid";
+        if (!cache_range((size_t)info.st_size, header.symbols_offset, header.symbols_size)) break;
+        int page = getpagesize();
+        if (page <= 0) break;
+        uint64_t offset = header.symbols_offset - header.symbols_offset % (unsigned)page;
+        size_t prefix = (size_t)(header.symbols_offset - offset);
+        if (header.symbols_size > SIZE_MAX - prefix) break;
+        file.mapping_size = (size_t)header.symbols_size + prefix;
+        file.mapping = mmap(NULL, file.mapping_size, PROT_READ, MAP_PRIVATE, fd, (off_t)offset);
+        if (file.mapping == MAP_FAILED) { file.mapping = NULL; break; }
+        if (!cache_symbols((const unsigned char *)file.mapping + prefix,
+                           (size_t)header.symbols_size, header.wide_entries, &file.symbols)) break;
+        *output = file;
+        available = true;
+        *error = NULL;
+    } while (false);
+    close(fd);
+    if (!available) close_cache_symbols(&file);
+    return available;
+}
+
+static inline bool open_active_cache_symbols(const char *path, const CacheHeader *active,
+                                             CacheSymbolsFile *output, const char **error) {
+    if (open_cache_symbols(path, active->uuid, active->magic, output, error)) return true;
+    if (!cache_uuid_present(active->symbols_uuid)) return false;
+    char companion[PATH_MAX];
+    int size = snprintf(companion, sizeof(companion), "%s.symbols", path);
+    if (size < 0 || (size_t)size >= sizeof(companion)) return false;
+    return open_cache_symbols(companion, active->symbols_uuid, active->magic, output, error);
+}
+
+static inline bool find_cache_symbols(const char *path, const CacheHeader *active,
+                                      CacheSymbolsFile *output, const char **error) {
+    const char *first_error = NULL;
+    if (path) {
+        if (open_active_cache_symbols(path, active, output, error)) return true;
+        if (strcmp(*error, "cache_symbols_file_unavailable")) first_error = *error;
+    }
+    // Older dyld reports the standard filename, which can differ from the
+    // active development cache. Every candidate still requires the active UUID.
+    const char *directories[] = {"/System/Library/Caches/com.apple.dyld", "/System/Library/dyld"};
+    const char *suffixes[] = {"", ".development"};
+    const char *architecture = active->magic[14] == 'e' ? "arm64e" : "arm64";
+    char candidate[PATH_MAX];
+    for (unsigned d = 0; d < sizeof(directories) / sizeof(*directories); d++) {
+        for (unsigned s = 0; s < sizeof(suffixes) / sizeof(*suffixes); s++) {
+            int size = snprintf(candidate, sizeof(candidate), "%s/dyld_shared_cache_%s%s",
+                                directories[d], architecture, suffixes[s]);
+            if (size < 0 || (size_t)size >= sizeof(candidate) || (path && !strcmp(path, candidate))) continue;
+            if (open_active_cache_symbols(candidate, active, output, error)) return true;
+            if (!first_error && strcmp(*error, "cache_symbols_file_unavailable")) first_error = *error;
+        }
+    }
+    *error = first_error ? first_error : "cache_symbols_file_unavailable";
+    return false;
+}
+
+static inline void *cache_symbol_function(const CacheSymbol *symbol, const void *image,
+                                          size_t length, intptr_t slide) {
+    const struct mach_header_64 *header = image;
+    if (!image || length < sizeof(*header) || header->filetype != MH_DYLIB ||
+        !(header->flags & MH_DYLIB_IN_CACHE)) return NULL;
+    uintptr_t address;
+    if (!slid_address(symbol->value, slide, &address)) return NULL;
+    void *function = image_address(image, length, address, slide, NULL, true, symbol->section);
+#if __has_feature(ptrauth_calls)
+    if (function) function = ptrauth_sign_unauthenticated(function, ptrauth_key_asia, 0);
+#endif
+    return function;
+}
+
+static inline void *cache_image_symbol(const CacheSymbols *symbols, uint64_t image_offset,
+                                       const void *image, size_t length, intptr_t slide,
+                                       const char *name, CacheSymbolResult *result) {
+    CacheSymbol symbol;
+    *result = cache_find_symbol(symbols, image_offset, name, &symbol);
+    if (*result != CACHE_SYMBOL_FOUND) return NULL;
+    void *function = cache_symbol_function(&symbol, image, length, slide);
+    if (!function) *result = CACHE_SYMBOL_INVALID;
+    return function;
+}
+
+static inline void *live_cache_symbol(const void *image, size_t length, intptr_t slide,
+                                      const void *cache, size_t cache_size, const char *name,
+                                      CacheSymbolResult *result) {
+    *result = CACHE_SYMBOL_INVALID;
+    if (!image || length < sizeof(struct mach_header_64) || !cache ||
+        cache_size > UINTPTR_MAX - (uintptr_t)cache) return NULL;
+    if ((uintptr_t)image < (uintptr_t)cache ||
+        !cache_range(cache_size, (uintptr_t)image - (uintptr_t)cache, length)) return NULL;
+    struct mach_header_64 header;
+    memcpy(&header, image, sizeof(header));
+    if (header.magic != MH_MAGIC_64 || header.cputype != CPU_TYPE_ARM64 ||
+        !(header.flags & MH_DYLIB_IN_CACHE) || header.filetype != MH_DYLIB ||
+        header.sizeofcmds > length - sizeof(header)) return NULL;
+    const unsigned char *cursor = (const unsigned char *)image + sizeof(header);
+    size_t remaining = header.sizeofcmds;
+    struct symtab_command table = {0};
+    struct segment_command_64 linkedit = {0};
+    bool table_found = false, linkedit_found = false;
+    for (uint32_t i = 0; i < header.ncmds; i++) {
+        struct load_command command;
+        if (remaining < sizeof(command)) return NULL;
+        memcpy(&command, cursor, sizeof(command));
+        if (command.cmdsize < sizeof(command) || command.cmdsize > remaining || command.cmdsize % 8) return NULL;
+        if (command.cmd == LC_SYMTAB) {
+            if (table_found || command.cmdsize != sizeof(table)) return NULL;
+            memcpy(&table, cursor, sizeof(table)); table_found = true;
+        } else if (command.cmd == LC_SEGMENT_64) {
+            struct segment_command_64 segment;
+            if (command.cmdsize < sizeof(segment)) return NULL;
+            memcpy(&segment, cursor, sizeof(segment));
+            if (segment.nsects > (command.cmdsize - sizeof(segment)) / sizeof(struct section_64)) return NULL;
+            if (!strncmp(segment.segname, "__LINKEDIT", sizeof(segment.segname))) {
+                if (linkedit_found) return NULL;
+                linkedit = segment; linkedit_found = true;
+            }
+        }
+        cursor += command.cmdsize; remaining -= command.cmdsize;
+    }
+    if (remaining) return NULL;
+    *result = CACHE_SYMBOL_MISSING;
+    if (!table_found || !linkedit_found || !table.nsyms) return NULL;
+    *result = CACHE_SYMBOL_INVALID;
+    uintptr_t base;
+    uint64_t nlist_size = (uint64_t)table.nsyms * sizeof(struct nlist_64);
+    if (!(linkedit.initprot & VM_PROT_READ) || table.symoff < linkedit.fileoff ||
+        table.stroff < linkedit.fileoff || !slid_address(linkedit.vmaddr, slide, &base) ||
+        base < (uintptr_t)cache || !cache_range(cache_size, base - (uintptr_t)cache, linkedit.vmsize)) return NULL;
+    uint64_t nlists = table.symoff - linkedit.fileoff, strings = table.stroff - linkedit.fileoff;
+    if (!cache_range(linkedit.filesize, nlists, nlist_size) ||
+        !cache_range(linkedit.vmsize, nlists, nlist_size) ||
+        !cache_range(linkedit.filesize, strings, table.strsize) ||
+        !cache_range(linkedit.vmsize, strings, table.strsize) ||
+        !cache_disjoint(nlists, nlist_size, strings, table.strsize)) return NULL;
+    CacheSymbol symbol;
+    *result = cache_nlist_symbol((const void *)(base + nlists), (size_t)nlist_size,
+                                 (const void *)(base + strings), table.strsize, name, &symbol);
+    if (*result != CACHE_SYMBOL_FOUND) return NULL;
+    void *function = cache_symbol_function(&symbol, image, length, slide);
+    if (!function) *result = CACHE_SYMBOL_INVALID;
+    return function;
+}
+
+typedef const void *(*CacheRange)(size_t *);
+typedef bool (*CacheUUID)(unsigned char *);
+typedef const char *(*CachePath)(void);
+typedef struct { CacheRange range; CacheUUID uuid; CachePath path; } CacheRuntime;
+
+static inline CacheRuntime cache_runtime(void) {
+    return (CacheRuntime){
+        .range = (CacheRange)dlsym(RTLD_DEFAULT, "_dyld_get_shared_cache_range"),
+        .uuid = (CacheUUID)dlsym(RTLD_DEFAULT, "_dyld_get_shared_cache_uuid"),
+        .path = (CachePath)dlsym(RTLD_DEFAULT, "dyld_shared_cache_file_path")};
+}
+
+#if KEYSTORE_SYMBOL_TARGET
+typedef struct {
+    bool checked, available, file_checked;
+    const void *base;
+    size_t size;
+    CacheHeader header;
+    const char *path;
+    CacheSymbolsFile file;
+    unsigned live_resolved, file_resolved;
+    const char *error;
+} CacheLookup;
+static CacheLookup cache_lookup;
+
+static void *shared_cache_symbol(const void *header, size_t length, intptr_t slide, const char *name) {
+    if (!cache_lookup.checked) {
+        cache_lookup.checked = true;
+        CacheRuntime runtime = cache_runtime();
+        unsigned char current_uuid[16];
+        cache_lookup.error = "shared_cache_api_unavailable";
+        if (!runtime.range || !runtime.uuid) return NULL;
+        cache_lookup.base = runtime.range(&cache_lookup.size);
+        cache_lookup.path = runtime.path ? runtime.path() : NULL;
+        cache_lookup.error = "shared_cache_identity_unavailable";
+        if (!cache_lookup.base || !runtime.uuid(current_uuid) ||
+            !cache_header(cache_lookup.base, cache_lookup.size, &cache_lookup.header) ||
+            memcmp(cache_lookup.header.uuid, current_uuid, 16)) return NULL;
+        cache_lookup.available = true;
+        cache_lookup.error = NULL;
+    }
+    if (!cache_lookup.available || (uintptr_t)header < (uintptr_t)cache_lookup.base) return NULL;
+    uint64_t offset = (uintptr_t)header - (uintptr_t)cache_lookup.base;
+    if (!cache_range(cache_lookup.size, offset, length)) return NULL;
+    CacheSymbolResult result;
+    void *function = live_cache_symbol(header, length, slide, cache_lookup.base, cache_lookup.size, name, &result);
+    if (function) { cache_lookup.live_resolved++; return function; }
+    if (!cache_lookup.file_checked) {
+        cache_lookup.file_checked = true;
+        find_cache_symbols(cache_lookup.path, &cache_lookup.header,
+                            &cache_lookup.file, &cache_lookup.error);
+    }
+    if (!cache_lookup.file.mapping) return NULL;
+    function = cache_image_symbol(&cache_lookup.file.symbols, offset, header, length, slide, name, &result);
+    if (function) cache_lookup.file_resolved++;
+    if (result == CACHE_SYMBOL_INVALID) cache_lookup.error = "cache_local_symbols_invalid";
+    return function;
+}
+#endif
 #endif
 
 static void *mapped_keystore_symbol(const char *name) {
-#if KEYSTORE_MAPPED_TARGET
+#if KEYSTORE_SYMBOL_TARGET
     // Reuse the endpoint's platform helpers and inspect the build once, only
-    // after a normal lookup fails. Unsupported hosts never load mapped images.
-    static bool checked, supported;
+    // after a normal lookup fails. Other hosts keep the ordinary lookup path.
+    static bool checked, supported, discovery;
     if (!checked) {
         supported = symbol_map_supported(system_value("kern.osversion").UTF8String,
                                          process_architecture().UTF8String);
+        discovery = cache_discovery_supported(system_value("kern.osproductversion").UTF8String,
+                                              system_value("kern.osversion").UTF8String,
+                                              process_architecture().UTF8String);
         checked = true;
     }
-    if (!supported) return NULL;
+    if (!supported && !discovery) return NULL;
     const MappedSymbol *symbol = find_symbol(name);
     if (!symbol) return NULL;
-    const char *path = keystore_images[symbol->image].path;
     // Called from the endpoint's serial request loop; retain handles for the
     // process lifetime so a returned function address cannot become unmapped.
-    static void *handles[sizeof(keystore_images) / sizeof(*keystore_images)];
-    if (!handles[symbol->image]) handles[symbol->image] = dlopen(path, RTLD_LAZY | RTLD_LOCAL);
-    if (!handles[symbol->image]) return NULL;
-    for (uint32_t i = 0; i < _dyld_image_count(); i++) {
-        const char *loaded = _dyld_get_image_name(i);
-        if (!loaded || strcmp(loaded, path)) continue;
-        const struct mach_header_64 *header = (const void *)_dyld_get_image_header(i);
-        // dyld owns the mapped header and load commands. Bound their extent
-        // before passing it to the same validator used by the fixture tests.
-        if (!header || header->sizeofcmds > 1024 * 1024) return NULL;
-        return image_symbol(header, sizeof(*header) + header->sizeofcmds,
-                            (uintptr_t)header, _dyld_get_image_vmaddr_slide(i), symbol);
+    enum { image_count = sizeof(keystore_images) / sizeof(*keystore_images) };
+    static void *handles[image_count + 1];
+    // Prefer exports in every candidate before using any private symbol.
+    for (unsigned pass = 0; pass <= image_count; pass++) {
+        unsigned index = pass < image_count ? (symbol->image + pass) % image_count : image_count;
+        const char *path = index < image_count ? keystore_images[index].path : keystore_path();
+        if (!handles[index]) handles[index] = dlopen(path, RTLD_LAZY | RTLD_LOCAL);
+        void *exported = handles[index] ? dlsym(handles[index], name) : NULL;
+        if (exported) return exported;
+    }
+    for (unsigned pass = 0; pass <= image_count; pass++) {
+        unsigned index = pass < image_count ? (symbol->image + pass) % image_count : image_count;
+        if (!handles[index]) continue;
+        const char *path = index < image_count ? keystore_images[index].path : keystore_path();
+        for (uint32_t i = 0; i < _dyld_image_count(); i++) {
+            const char *loaded = _dyld_get_image_name(i);
+            if (!loaded || strcmp(loaded, path)) continue;
+            const struct mach_header_64 *header = (const void *)_dyld_get_image_header(i);
+            // dyld owns these headers; bound metadata before either resolver.
+            if (!header || header->sizeofcmds > 1024 * 1024) return NULL;
+            size_t length = sizeof(*header) + header->sizeofcmds;
+            intptr_t slide = _dyld_get_image_vmaddr_slide(i);
+            void *function = supported && index == symbol->image
+                ? image_symbol(header, length, (uintptr_t)header, slide, symbol) : NULL;
+            if (!function && discovery) function = shared_cache_symbol(header, length, slide, name);
+            if (function) return function;
+            break;
+        }
     }
 #else
     (void)name;
@@ -261,12 +539,7 @@ static void *required_symbol(void *library, const char *name,
 }
 
 static void *keystore_library(void) {
-#if TARGET_OS_IPHONE
-    const char *path = "/System/Library/PrivateFrameworks/AppleKeyStore.framework/AppleKeyStore";
-#else
-    const char *path = "/System/Library/PrivateFrameworks/AppleKeyStore.framework/Versions/A/AppleKeyStore";
-#endif
-    return dlopen(path, RTLD_LAZY | RTLD_LOCAL);
+    return dlopen(keystore_path(), RTLD_LAZY | RTLD_LOCAL);
 }
 
 static NSMutableArray<NSString *> *load_keystore(KeyStore *keys, void *library,
@@ -376,6 +649,19 @@ int main(int argc, const char *argv[]) {
             @"process_architecture": process_architecture(), @"minimum_ios": @"15.0",
             @"product_type": system_value("hw.machine"), @"os_build": system_value("kern.osversion"),
             @"os_version": system_value("kern.osproductversion"), @"end_to_end_verified": @NO} mutableCopy];
+#if KEYSTORE_SYMBOL_TARGET
+        if (cache_discovery_supported([capability_report[@"os_version"] UTF8String],
+                                      [capability_report[@"os_build"] UTF8String],
+                                      [capability_report[@"process_architecture"] UTF8String])) {
+            NSMutableDictionary *resolution = [@{@"shared_cache_discovery": @YES,
+                @"cache_symbols_checked": @(cache_lookup.file_checked),
+                @"cache_symbols_available": @(cache_lookup.file.mapping != NULL),
+                @"loaded_symbols_resolved": @(cache_lookup.live_resolved),
+                @"cache_file_symbols_resolved": @(cache_lookup.file_resolved)} mutableCopy];
+            if (cache_lookup.error) resolution[@"error"] = @(cache_lookup.error);
+            capability_report[@"keystore_resolution"] = resolution;
+        }
+#endif
         if (!available) {
             capability_report[@"ready"] = @NO;
             capability_report[@"error"] = library ? @"required_keystore_symbols_unavailable" : @"keystore_library_unavailable";
