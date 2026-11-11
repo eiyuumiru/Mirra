@@ -15,6 +15,7 @@ authentication, video or input fail?
 
 - Mirra version and package checksum, if available:
 - macOS version and build:
+- Host SIP status (disabled, partially enabled or fully enabled; include partial settings if applicable):
 - Host model, Wi-Fi driver and video driver:
 - Bridge model, iOS, jailbreak and SSH transport:
 - Target iPhone model and iOS:

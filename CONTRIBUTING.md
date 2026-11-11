@@ -7,10 +7,14 @@ third-party notices.
 
 ## Report a bug
 
-Include the Mirra version, macOS version and build, host model, Wi-Fi/video
-drivers, bridge model and jailbreak, target iOS, and connection transport.
-Include the package checksum when available. State whether setup, discovery,
-authentication, video or input failed and how to reproduce it.
+Include the Mirra version, macOS version and build, host model and SIP status,
+Wi-Fi/video drivers, bridge model and jailbreak, target iOS, and connection
+transport. Include the package checksum when available. State whether setup,
+discovery, authentication, video or input failed and how to reproduce it.
+
+Check the [host SIP requirement](docs/Installation.md#system-integrity-protection-sip)
+before testing: fully enabled SIP is currently unsupported. Report the partial
+configuration when using partially enabled SIP.
 
 Keep logs from the same attempt and redact credentials, account information,
 device identifiers and personal content before sharing. See [SECURITY.md](SECURITY.md).

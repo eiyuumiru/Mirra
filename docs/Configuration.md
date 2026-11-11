@@ -87,6 +87,9 @@ The host report reads configured prerequisites. `--backend` also starts the
 provisioned endpoint, creates and validates a disposable attested key, then
 closes it. USB diagnostics need a running forwarder.
 
+Check the [host SIP requirement](Installation.md#system-integrity-protection-sip)
+separately. These reports do not verify a compatible SIP configuration.
+
 The endpoint greeting includes a certificate digest, which must match the local
 certificate. Legacy greetings without a digest cannot report verified binding.
 Target authentication and media are checked in a connected Mirroring session.

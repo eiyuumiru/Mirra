@@ -13,6 +13,18 @@ Python and the required helpers are included. Check
 
 GitHub's **Source code** downloads are for [building the app](Build.md).
 
+## System Integrity Protection (SIP)
+
+Mirra currently does not work with SIP fully enabled on the macOS host.
+Before setting up native support, disable SIP or use a compatible partially
+enabled configuration that allows Mirra's support components to run.
+
+Check the current SIP status in Terminal:
+
+```sh
+csrutil status
+```
+
 ## macOS security prompts
 
 The current packaging process uses ad-hoc signing and does not notarize the app.
@@ -55,6 +67,7 @@ keys and certificate. Command-line service updates are described in
 
 ## Troubleshooting
 
+- **SIP fully enabled:** use disabled or compatible partially enabled SIP before starting support.
 - **Host or framework rejected:** inspect the compatibility report; see [Media](Media.md).
 - **SSH host-key mismatch:** verify the bridge's identity and configured fingerprint.
 - **Forwarding port occupied:** stop the competing proxy or use the existing verified forwarder.

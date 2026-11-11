@@ -45,16 +45,24 @@ Stock constants, unknown stubs and other service values are left alone. The
 replacement preserves initializer ownership and does not retain the invalid
 argument. An inherited method is overridden only on the target class.
 
-The [PR author's successful connection report](https://github.com/eiyuumiru/Mirra/issues/3#issuecomment-6747391254)
+The lookup uses the public C spelling
+`AWDLTrafficRegistrationServiceRemoteScreen` with `dlsym`. The earlier lookup
+included the Mach-O underscore prefix and could return no symbol, preventing
+the repair in the 0.1.1 package. @OiviaDesu corrected the lookup in
+[PR #5](https://github.com/eiyuumiru/Mirra/pull/5).
+
+The [contributor's successful correction retest](https://github.com/eiyuumiru/Mirra/issues/3#issuecomment-6787375682)
 applies to MacBookPro10,1, OCLP 3.0.0-rc.5 and build `25G332`, with the `no_fls`
-decoder route. It does not establish that an iMac startup failure has the same
-cause. This branch already chooses `no_fls` automatically for Intel `25G332`;
+decoder route and an iPhone8,2 bridge on `19H422`. It does not establish that an
+iMac startup failure has the same cause. Mirra chooses `no_fls` automatically
+for Intel `25G332`;
 see [Decoder compatibility](Decoder.md) for unload failure and fallback behavior.
 
-`make awdl-service` checks the repair with local fixture classes, including
-stock paths, mismatched code and ABI, repeated installation, inherited methods,
-argument preservation and object lifetime. It does not launch Apple's app or
-verify a connection on an OCLP device.
+`make awdl-service` checks the public class and exported-symbol lookup with local
+fixture classes, including stock paths, mismatched code and ABI, repeated
+installation, inherited methods, argument preservation and object lifetime.
+The fixtures reject the previous underscored lookup. They do not launch Apple's
+app or verify a connection on an OCLP device.
 
 ## Resolution and text clarity
 
@@ -92,6 +100,11 @@ The inspector reports architecture, macOS build, framework versions, private
 symbols and Objective-C method signatures. It accepts Intel macOS 15 or later
 only when the required media and launch methods and keystore exports are present
 and compatible. Package preparation and native startup require a passing result.
+
+A passing interface report does not establish SIP compatibility. Native support
+requires SIP disabled or a compatible partially enabled configuration on the
+macOS host; fully enabled SIP is currently unsupported. See
+[SIP configuration](Installation.md#system-integrity-protection-sip).
 
 The report distinguishes the tested reference from experimental hosts. Matching
 symbols and method signatures do not prove private C-function behavior or a

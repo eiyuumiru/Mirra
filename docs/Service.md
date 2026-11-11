@@ -6,6 +6,10 @@ with the CLI below after building and provisioning a bridge.
 
 ## Install and control
 
+Native support requires SIP disabled or a compatible partially enabled
+configuration on the macOS host. Fully enabled SIP is currently unsupported;
+see [SIP configuration](Installation.md#system-integrity-protection-sip).
+
 Stop competing support processes and USB proxies before installation.
 
 ```sh
@@ -31,6 +35,19 @@ python3 scripts/service.py remove
 `start` loads it again. `remove` stops support and removes the owned registration,
 preserving private setup, logs and the installed package.
 
+If Apple's iPhone Mirroring is already open when background support starts,
+support waits for it to quit before preparing a session. Mirra shows **Quit
+iPhone Mirroring**: use Command-Q in Apple's app, then wait for Mirra to become
+ready. Startup continues automatically in the same support process. Stop still
+cancels this wait. Closing only the app's window may leave it running.
+
+Earlier v0.1.2 builds predate this startup recovery change. If they encounter
+this order of startup, support stays paused even after Apple's app quits. Quit
+iPhone Mirroring, open Mirra's Settings, choose **Stop**, wait for shutdown, then
+choose **Start**. Wait for readiness before opening iPhone Mirroring again. This
+case records `Close the existing Mirroring app before starting a native session`
+and `NATIVE_STARTUP_PAUSED` in the service log.
+
 ## macOS data-access prompts
 
 The native socket helper uses a temporary directory inside iPhone Mirroring's
@@ -46,10 +63,12 @@ temporary directory. If the folder is missing, open and quit Apple's iPhone
 Mirroring once before retrying. A later startup error still needs its own
 diagnosis in the service log; granting file access does not prove readiness.
 
-An interrupted startup is also held on the next launchd invocation. A normal
-stop rearms it. Bridge reconnection inside a running native session remains
-automatic. No Full Disk Access grant or privacy-database changes are required
-by this fix. See Apple's [macOS app-data privacy explanation](https://developer.apple.com/videos/play/wwdc2023/10053/).
+An interrupted preparation is also held on the next launchd invocation. A normal
+stop rearms it. Waiting for iPhone Mirroring to quit can resume after a support
+restart because session preparation has not begun. Bridge reconnection inside
+a running native session remains automatic. No Full Disk Access grant or
+privacy-database changes are required by this fix. See Apple's
+[macOS app-data privacy explanation](https://developer.apple.com/videos/play/wwdc2023/10053/).
 
 ## Update or switch profiles
 

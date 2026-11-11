@@ -11,6 +11,10 @@ All macOS components target Intel `x86_64` and macOS 15.0, including the interfa
 password helper and injected adapters. The iPhone endpoint separately targets
 arm64 iOS 15. The deployment target is independent of the SDK used to build.
 
+Running Mirra's native support requires SIP disabled or a compatible partially
+enabled configuration on the macOS host. Fully enabled SIP is currently
+unsupported; see [SIP configuration](Installation.md#system-integrity-protection-sip).
+
 ## Build the app
 
 ```sh
@@ -85,8 +89,9 @@ The endpoint is signed on the phone during [Bridge setup](Setup.md) using `ldid`
 and `config/endpoint.plist`.
 
 The endpoint's [keystore loader](KeyStore.md) keeps normal symbol lookup first
-and tries the verified build-specific map only for missing functions. The same
-source and build path serve both cases.
+and tries the verified build-specific map only for missing functions. On iOS 15,
+it also searches loaded image tables and UUID-matched dyld cache symbol data.
+All paths use the same endpoint source, typed API and build command.
 
 ## Checks
 
@@ -99,7 +104,7 @@ Run the checks appropriate to the change:
 | `make authorization` | SSH password helper and secure input channel |
 | `make keystore` | Bridge protocol and owned-session cleanup |
 | `make media` | Media hook behavior and incompatible-interface rejection |
-| `make awdl-service` | OCLP service repair, ABI guards and object lifetime using fixture classes |
+| `make awdl-service` | Public OCLP symbol lookup, repair guards and object lifetime using fixture classes |
 | `make symbols` | Shared keystore loader and image guards using host fixtures |
 | `make compatibility` | macOS version and architecture acceptance |
 | `make decoder` | Decoder option filtering, stream metadata and argument preservation |

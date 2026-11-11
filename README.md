@@ -10,7 +10,7 @@ A native macOS companion for Apple's iPhone Mirroring on Hackintosh.
 
 [Get started](#get-started) · [Compatibility](#compatibility) · [Screenshots](#screenshots) · [Build](#build-from-source) · [Documentation](#documentation)
 
-**0.1.1 · Experimental · Intel macOS**
+**Experimental · v0.1.2 · Intel-based Macs**
 
 <p>
   <a href="https://ko-fi.com/eiyuumiru"><img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Support Mirra on Ko-fi"></a>
@@ -60,6 +60,9 @@ pairing and authentication requirements still apply.
 
 ## Get started
 
+Check [host compatibility](#compatibility), including the
+[SIP requirement](docs/Installation.md#system-integrity-protection-sip), before setup.
+
 1. Get the app DMG from [Releases](https://github.com/eiyuumiru/Mirra/releases)
    or the maintainer.
 2. Open the DMG, drag **Mirra.app** onto **Applications**, then eject the image.
@@ -80,15 +83,21 @@ support running. See the [app guide](docs/App.md) for details.
 
 ## Compatibility
 
-Mirra targets Intel macOS 15 or later. It checks the required private framework
-interfaces before starting support; an OS version alone does not establish
-compatibility. Sequoia support is experimental and still needs a live connection
+Mirra targets Intel-based Macs running macOS 15 or later. It checks the required
+private framework interfaces before starting support; an OS version alone does
+not establish compatibility. Sequoia support is experimental and still needs a live connection
 test. The verified reference remains macOS 26.7.2 (`25G332`) with iPhone Mirroring
 1.6 (`98.5`).
+
+**Mirra currently does not work with System Integrity Protection (SIP) fully enabled.**
+Disable SIP or use a compatible partially enabled configuration on the macOS
+host before setting up native support. See
+[SIP configuration](docs/Installation.md#system-integrity-protection-sip).
 
 | Component | Requirement |
 | --- | --- |
 | Host | Intel `x86_64`, macOS 15 or later with compatible private interfaces |
+| SIP on the host | Disabled or a compatible partially enabled configuration; fully enabled SIP is currently unsupported |
 | Apple app | Apple's installed iPhone Mirroring 1.x system app |
 | Bridge | Compatible jailbroken iPhone running **iOS 15 or later**, with OpenSSH and `ldid`; see [Bridge compatibility](docs/Bridges.md) |
 | Target iPhone | Meets [Apple's iPhone Mirroring requirements](https://support.apple.com/en-us/120421) |
@@ -134,6 +143,7 @@ GitHub's **Source code** downloads provide the source for each tagged release.
 
 | Problem | What to check |
 | --- | --- |
+| SIP fully enabled | Use disabled or compatible partially enabled SIP; see [Installation](docs/Installation.md#system-integrity-protection-sip) |
 | Waiting for the bridge | Jailbreak, SSH access and the selected Wi-Fi address or USB device |
 | iPhone not found | Target lock state, proximity, Wi-Fi, Bluetooth and Apple Account |
 | Bridge ready but Mirroring fails | Apple's connection error and logs from the same attempt |
@@ -172,7 +182,9 @@ Mirra's original source and artwork use the [MIT License](LICENSE).
 [@OiviaDesu](https://github.com/OiviaDesu) contributed the keystore symbol map,
 fallback lookup and device self-check in [PR #4](https://github.com/eiyuumiru/Mirra/pull/4).
 The same contributor provided the OCLP RemoteScreen service repair and device
-validation reports. Both adapted commits retain co-author credit.
+validation reports, and corrected its exported-symbol lookup in
+[PR #5](https://github.com/eiyuumiru/Mirra/pull/5). Adapted commits retain
+co-author credit.
 
 [MtkWireless](https://github.com/Dino-VN/MtkWireless) and the
 [HighDelay NVIDIA driver](https://github.com/HighDelay/nvidia-macos-driver/releases)

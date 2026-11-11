@@ -3,14 +3,16 @@
 `VERSION` supplies the release version. `config/release.json` supplies internal
 bundle metadata and the repository URL. Package filenames use that version.
 
-The release version is **0.1.1**. Its source version and
-[changelog](../CHANGELOG.md#011) are prepared. Local packages can be built and
+The release version is **0.1.2**. Its source version and
+[changelog](../CHANGELOG.md#012) are prepared. Local packages can be built and
 staged for review; tagging and publication are separate steps.
 
 ## Prepare
 
 - Update the changelog and compatibility documentation for the change.
 - Run relevant source and native checks, plus device tests for runtime changes.
+- Record the host's SIP configuration with live test results. Fully enabled SIP
+  is currently unsupported; use disabled or compatible partially enabled SIP.
 - Build from a clean checkout or the source for the selected release tag.
 - Check the app signature, bundled runtime and third-party notices.
 - Mount the DMG, verify the Applications shortcut and test app relocation.
@@ -26,7 +28,7 @@ The command creates `Mirra-v<version>.dmg` under `dist/app` and prints its SHA-2
 Stage the selected DMG under `dist/v<version>/` alongside `SHA256SUMS` and
 `RELEASE-NOTES.md`, following the v0.1.0 release layout. Keep internal build
 numbers out of release asset names. The internal bundle number advances once
-per release: v0.1.0 uses 31 and v0.1.1 uses 32.
+per release: v0.1.0 uses 31, v0.1.1 uses 32 and v0.1.2 uses 33.
 
 ## Publish
 

@@ -91,6 +91,11 @@ python3 scripts/doctor.py --config private/bridge/ready.json --backend --json
 
 ## Install support
 
+Before starting native support, check the macOS host's
+[SIP configuration](Installation.md#system-integrity-protection-sip). Mirra
+requires SIP disabled or a compatible partially enabled configuration;
+fully enabled SIP is currently unsupported.
+
 Stop any temporary USB proxy or manual support process, then install the saved
 profile:
 

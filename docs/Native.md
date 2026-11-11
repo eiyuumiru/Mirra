@@ -6,6 +6,11 @@ Mirroring interface.
 
 ## Startup
 
+The macOS host must use disabled or compatible partially enabled SIP. Fully
+enabled SIP is currently unsupported; check
+[SIP configuration](Installation.md#system-integrity-protection-sip) before
+starting support.
+
 With a configured bridge, run native support from the source checkout:
 
 ```sh

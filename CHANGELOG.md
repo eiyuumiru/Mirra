@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.1.2
+
+- Correct the OCLP RemoteScreen export lookup through `dlsym`, contributed by
+  [@OiviaDesu](https://github.com/OiviaDesu) in
+  [PR #5](https://github.com/eiyuumiru/Mirra/pull/5). The earlier lookup used the
+  Mach-O underscore prefix and could miss the export, leaving the reported
+  Mirroring crash after bridge setup unchanged. The existing exact-stub, method
+  signature and object-ownership guards remain in place.
+- Extend the existing keystore loader's missing-symbol discovery to every iOS 15
+  build, including arm64e caches. Keep exported symbols first and the existing
+  verified `19H422` map, then resolve functions from loaded image tables or the
+  active dyld cache's inline or companion symbol data. Check UUIDs, file metadata,
+  table bounds, executable sections and function addresses before using them.
+  The bridge protocol, certificate operations and missing-symbol errors are
+  preserved. See [Keystore loading](docs/KeyStore.md) for limits and attribution.
+- Recover an abandoned sharingd registration when its recorded runtime directory
+  or plist has disappeared. Verify the private journal and loaded job's exact
+  adapter and log paths, then confirm restoration of the original registration
+  before clearing recovery state. Keep live-owner, child-process, session-lock
+  and workspace-lease checks. Recover stopped support before updating it while
+  preserving the saved bridge and failed-attempt diagnostics.
+- Wait when Apple's iPhone Mirroring is already open before support starts,
+  then continue automatically in the same support process after the app quits.
+  Show a Command-Q instruction with Check again and Stop. Preserve deliberate
+  recovery for failed or interrupted preparation and existing ownership and
+  abandoned-session cleanup checks.
+
+The AWDL fixtures now exercise the public class and exported-symbol lookup, so
+the previous underscored lookup fails the regression check. @OiviaDesu reported
+a successful connection with the OCLP correction on the affected MacBookPro10,1
+(`25G332`) and iPhone8,2 bridge (`19H422`). That local retest is recorded in
+[issue #3](https://github.com/eiyuumiru/Mirra/issues/3#issuecomment-6787375682).
+The broader iOS 15 discovery and missing-runtime recovery have fixture validation;
+physical-device confirmation on other iOS 15 builds and the affected recovery
+configuration is still needed. Startup waiting, cancellation and failure
+preservation have process and fixture validation; login-restoration and device
+retesting of the rebuilt DMG are still needed. Bridge iPhones require a
+compatible active jailbreak and **iOS 15 or later**.
+
+On the macOS host, Mirra requires SIP disabled or a compatible partially enabled
+configuration. Fully enabled SIP is currently unsupported. See
+[SIP configuration](docs/Installation.md#system-integrity-protection-sip).
+
 ## 0.1.1
 
 - Recover pending app-launch, decoder and sharing sessions before updating

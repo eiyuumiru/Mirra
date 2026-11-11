@@ -7,7 +7,8 @@ additional devices and hosts.
 ## Areas to validate
 
 - Additional bridge models, iOS versions and jailbreak layouts.
-- Additional macOS builds and Wi-Fi/video drivers.
+- Additional macOS builds, compatible partial SIP configurations and Wi-Fi/video
+  drivers.
 - First-time SSH authorization and certificate issuance without a cache.
 - Video quality, input latency and sustained audio/video sessions.
 - Reconnection after idle periods, login, restart and sleep/wake.
@@ -20,6 +21,10 @@ Check package manifests, signatures, runtime relocation, relevant regression tes
 controls. For device changes, complete setup and a connected Mirroring session,
 including reconnection and cleanup.
 
-Record the configuration and observed results. Readiness reports and isolated
-API tests describe their own scope; video, input and native features need
-direct verification on the affected devices.
+Record the configuration, host SIP status and observed results. Fully enabled
+SIP is currently unsupported; native support requires disabled or compatible
+partially enabled SIP. See
+[Installation](Installation.md#system-integrity-protection-sip).
+
+Readiness reports and isolated API tests describe their own scope; video, input
+and native features need direct verification on the affected devices.
