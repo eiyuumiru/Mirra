@@ -110,7 +110,7 @@ media: awdl-service $(BUILD)/media.dylib $(BUILD)/inspector $(BUILD)/mediaprobe 
 	python3 tests/checkmedia.py
 
 $(BUILD)/awdl-service: tests/awdl-service.m src/mirroring/awdl-service.m src/mirroring/awdl-service.h $(BUILD)/.host-target | $(BUILD)/.dir
-	xcrun clang $(HOST_FLAGS) -fobjc-arc -Wall -Wextra -Werror -framework Foundation "$<" -o "$@"
+	xcrun clang $(HOST_FLAGS) -fobjc-arc -Wall -Wextra -Werror -framework Foundation -Wl,-exported_symbol,_AWDLTrafficRegistrationServiceRemoteScreen "$<" -o "$@"
 
 .PHONY: awdl-service
 awdl-service: $(BUILD)/awdl-service

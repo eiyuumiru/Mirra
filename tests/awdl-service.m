@@ -19,8 +19,9 @@ static unsigned checks, releases, calls;
 - (void)dealloc { releases++; }
 @end
 
-@interface ChildReservationFixture : ReservationFixture @end
-@implementation ChildReservationFixture @end
+// Use the production class and export names so the public lookup is tested.
+@interface WiFiP2PTrafficRegistrationReservation : ReservationFixture @end
+@implementation WiFiP2PTrafficRegistrationReservation @end
 
 @interface BadReservationFixture : NSObject
 - (int)initForService:(int)service;
@@ -29,7 +30,7 @@ static unsigned checks, releases, calls;
 - (int)initForService:(int)service { return service; }
 @end
 
-__attribute__((naked, noinline, used)) static void wrapper_stub(void) {
+__attribute__((naked, noinline, used)) void AWDLTrafficRegistrationServiceRemoteScreen(void) {
     __asm__(".byte 0x55,0x48,0x89,0xe5,0x31,0xc0,0x5d,0xc3");
 }
 __attribute__((naked, noinline, used)) static void other_stub(void) {
@@ -38,27 +39,27 @@ __attribute__((naked, noinline, used)) static void other_stub(void) {
 
 int main(void) {
     @autoreleasepool {
-        Class parent = [ReservationFixture class], target = [ChildReservationFixture class];
+        Class parent = [ReservationFixture class], target = [WiFiP2PTrafficRegistrationReservation class];
         SEL selector = @selector(initForService:);
         IMP before = class_getMethodImplementation(parent, selector);
         NSString *stock = @"RemoteScreen";
         const unsigned char data_stub[] = {0x55,0x48,0x89,0xe5,0x31,0xc0,0x5d,0xc3};
-        CHECK(known_stub(wrapper_stub));
+        CHECK(known_stub(AWDLTrafficRegistrationServiceRemoteScreen));
         CHECK(!known_stub(other_stub)); CHECK(!known_stub(NULL));
         CHECK(!known_stub(&stock)); CHECK(!known_stub(data_stub));
-        CHECK(!install_repair(Nil, wrapper_stub));
-        CHECK(!install_repair([NSObject class], wrapper_stub));
-        CHECK(!install_repair([BadReservationFixture class], wrapper_stub));
+        CHECK(!install_repair(Nil, AWDLTrafficRegistrationServiceRemoteScreen));
+        CHECK(!install_repair([NSObject class], AWDLTrafficRegistrationServiceRemoteScreen));
+        CHECK(!install_repair([BadReservationFixture class], AWDLTrafficRegistrationServiceRemoteScreen));
         CHECK(!install_repair(target, &stock));
         CHECK(!install_repair(target, other_stub));
         CHECK(class_getMethodImplementation(target, selector) == before);
-        CHECK(install_repair(target, wrapper_stub));
-        CHECK(install_repair(target, wrapper_stub)); // Idempotent; no recursive IMP.
+        CHECK(MirraRepairAWDLService());
+        CHECK(MirraRepairAWDLService()); // Idempotent; no recursive IMP.
         CHECK(class_getMethodImplementation(parent, selector) == before);
-        CHECK(!install_repair(parent, wrapper_stub));
+        CHECK(!install_repair(parent, AWDLTrafficRegistrationServiceRemoteScreen));
         // Preserve init ownership even for a value that would crash on retain.
         uintptr_t poison = 0;
-        memcpy(&poison, wrapper_stub, sizeof(poison));
+        memcpy(&poison, AWDLTrafficRegistrationServiceRemoteScreen, sizeof(poison));
         __unsafe_unretained id invalid = (__bridge id)(void *)poison;
         ReservationInit init = (ReservationInit)class_getMethodImplementation(target, selector);
         __weak ReservationFixture *weak = nil;
@@ -71,12 +72,12 @@ int main(void) {
         CHECK(!weak); CHECK(releases == 1);
         @autoreleasepool {
             NSMutableString *ordinary = [NSMutableString stringWithString:@"AirPlay"];
-            ReservationFixture *object = [[ChildReservationFixture alloc] initForService:ordinary];
+            ReservationFixture *object = [[WiFiP2PTrafficRegistrationReservation alloc] initForService:ordinary];
             [ordinary appendString:@" changed"];
             CHECK([object.service isEqualToString:@"AirPlay"]);
-            ReservationFixture *empty = [[ChildReservationFixture alloc] initForService:nil];
+            ReservationFixture *empty = [[WiFiP2PTrafficRegistrationReservation alloc] initForService:nil];
             CHECK(empty.service == nil);
-            ReservationFixture *stockObject = [[ChildReservationFixture alloc] initForService:stock];
+            ReservationFixture *stockObject = [[WiFiP2PTrafficRegistrationReservation alloc] initForService:stock];
             CHECK([stockObject.service isEqualToString:stock]);
             CHECK(calls == 4);
         }
