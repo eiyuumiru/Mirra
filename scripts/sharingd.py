@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import re
 import stat
 import subprocess
 
@@ -15,20 +16,32 @@ ORIGINAL_PLIST = Path('/System/Library/LaunchAgents/com.apple.sharingd.plist')
 PROGRAM = '/usr/libexec/sharingd'
 
 
-def launchctl(*arguments):
-    return subprocess.run(['launchctl', *arguments], capture_output=True, text=True, timeout=15)
+def launchctl(*arguments, timeout=15):
+    return subprocess.run(['launchctl', *arguments], capture_output=True, text=True, timeout=timeout)
 
 
-def service(target=None):
-    reply = launchctl('print', target or f'gui/{os.getuid()}/com.apple.sharingd')
+def service(target=None, *, timeout=15):
+    reply = launchctl('print', target or f'gui/{os.getuid()}/com.apple.sharingd', timeout=timeout)
     if reply.returncode:
         if 'Could not find service' in reply.stderr:
             return {}
         raise RuntimeError('Cannot inspect sharingd registration: ' + reply.stderr.strip())
-    values = {'injected': 'DYLD_INSERT_LIBRARIES' in reply.stdout or 'MIRRA_KEYSTORE' in reply.stdout}
+    values = {'injected': 'DYLD_INSERT_LIBRARIES' in reply.stdout or 'MIRRA_KEYSTORE' in reply.stdout,
+              'environment': {}}
+    environment = False
     for line in reply.stdout.splitlines():
-        key, separator, value = line.strip().partition(' = ')
-        if separator and key in {'program', 'path', 'pid', 'state', 'last exit code'}:
+        line = line.strip()
+        if line == 'environment = {':
+            environment = True
+        elif line == '}':
+            environment = False
+        elif environment:
+            key, separator, value = line.partition(' => ')
+            if separator and key == 'DYLD_INSERT_LIBRARIES':
+                values['environment'][key] = value
+        key, separator, value = line.partition(' = ')
+        if separator and key in {'program', 'path', 'pid', 'state', 'last exit code',
+                                 'stdout path', 'stderr path'}:
             values.setdefault(key, value)
     return values
 
@@ -36,6 +49,20 @@ def service(target=None):
 def is_original(state):
     return (state.get('program') == PROGRAM and state.get('path') == str(ORIGINAL_PLIST)
             and not state.get('injected'))
+
+
+def _private_directory(directory):
+    """Validate the directory or its nearest remaining ancestor; never recreate it."""
+    parent = directory
+    while True:
+        try:
+            info = parent.lstat()
+            break
+        except FileNotFoundError:
+            parent = parent.parent
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        raise RuntimeError('sharingd ownership directory is not private')
+    return parent == directory
 
 
 class SharingdAgent:
@@ -72,23 +99,42 @@ class SharingdAgent:
         if (not isinstance(birth, list) or len(birth) != 4 or any(type(n) is not int for n in birth)
                 or birth[0] <= 0 or birth[1] != os.getuid()):
             raise RuntimeError('Invalid sharingd controller identity')
-        directory = Path(record.get('directory', ''))
+        if not isinstance(record.get('directory'), str):
+            raise RuntimeError('Invalid sharingd ownership directory')
+        directory = Path(record['directory'])
         if not directory.is_absolute() or directory.resolve() != directory:
             raise RuntimeError('Invalid sharingd ownership directory')
-        info = directory.lstat()
-        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
-            raise RuntimeError('sharingd ownership directory is not private')
-        if not isinstance(record.get('plist_sha256'), str) or len(record['plist_sha256']) != 64:
+        _private_directory(directory)
+        if (not isinstance(record.get('plist_sha256'), str)
+                or re.fullmatch('[0-9a-f]{64}', record['plist_sha256']) is None):
             raise RuntimeError('Invalid sharingd launch configuration digest')
         return record
+
+    def _verify_owned_job(self, current, directory, digest):
+        plist = directory / 'sharing.plist'
+        try:
+            info = plist.lstat()
+        except FileNotFoundError:
+            # launchd retains a loaded definition even if its source folder was
+            # removed. The private journal and the job's exact adapter/log paths
+            # must agree before an abandoned registration may be unloaded.
+            if (current.get('injected') is not True
+                    or current.get('environment', {}).get('DYLD_INSERT_LIBRARIES')
+                       != str(directory / 'keystore.dylib')
+                    or current.get('stdout path') != str(directory / 'sharingd.stdout.log')
+                    or current.get('stderr path') != str(directory / 'sharingd.stderr.log')):
+                raise RuntimeError('Missing sharingd configuration cannot be verified; recovery deferred')
+        else:
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077
+                    or hashlib.sha256(plist.read_bytes()).hexdigest() != digest):
+                raise RuntimeError('Owned sharingd configuration changed; recovery deferred')
 
     def _restore(self, record):
         directory = Path(record['directory'])
         plist = directory / 'sharing.plist'
         current = service(self.target)
         if current.get('path') == str(plist) and current.get('program') == PROGRAM:
-            if hashlib.sha256(plist.read_bytes()).hexdigest() != record['plist_sha256']:
-                raise RuntimeError('Owned sharingd configuration changed; recovery deferred')
+            self._verify_owned_job(current, directory, record['plist_sha256'])
             reply = launchctl('bootout', self.target)
             if reply.returncode:
                 raise RuntimeError('Cannot unload owned sharingd: ' + reply.stderr.strip())
@@ -102,7 +148,11 @@ class SharingdAgent:
         restored = service(self.target)
         if not is_original(restored):
             raise RuntimeError('Original sharingd restoration is not verified')
-        write_state(directory / 'sharingd-last-restore.json', restored)
+        if _private_directory(directory):
+            write_state(directory / 'sharingd-last-restore.json', restored)
+        else:
+            write_state(self.cache / 'sharingd-last-restore.json',
+                        {'directory': str(directory), 'state': restored})
         self.journal.unlink()
         return restored
 

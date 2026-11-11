@@ -156,6 +156,17 @@ class SupportStatusTests(unittest.TestCase):
         self.assertEqual(result['state'], 'needs_attention')
         self.assertNotIn('retry automatically', result['detail'])
 
+    def test_private_recovery_error_does_not_enter_the_public_status(self):
+        self.snapshot['backend_ready'] = False
+        self.backend.update(phase='waiting_for_cleanup', attempt=0, ready=False,
+            observation_error={'error_type': 'FileNotFoundError',
+                               'error': '/Users/private/runtime token=secret', 'errno': 2})
+        self.write_backend()
+        result = observe(self.service)
+        self.assertEqual(result['state'], 'restoring')
+        self.assertNotIn('/Users/private', json.dumps(result))
+        self.assertNotIn('secret', json.dumps(result))
+
     def test_startup_failure_is_actionable_without_claiming_readiness(self):
         self.snapshot.update(native_launch_support_ready=False, backend_ready=False)
         for code in ('container_access_denied', 'container_missing', 'startup_interrupted',

@@ -388,6 +388,176 @@ class NativeServiceTests(unittest.TestCase):
         for name, data in credentials.items():
             self.assertEqual(getattr(current, name).read_bytes(), data)
 
+    def missing_runtime_session(self, *, running=True):
+        """The captured Wins state: an older sharingd job outlives its removed runtime."""
+        import decoder_route
+        from sharingd import ORIGINAL_PLIST, PROGRAM
+
+        self.prepare()
+        manifest = self.service.package / 'manifest.json'
+        value = json.loads(manifest.read_text())
+        value['support_revision'] = SUPPORT_REVISION - 1
+        write_state(manifest, value)
+        self.install_plist(self.service.definition(self.config))
+        run = self.service.package / 'runtime/native-20261111-073111'
+        run.mkdir(parents=True, mode=0o700)
+        missing = run.parent / 'native-20261111-065931/backend-000001'
+        birth = [42, os.getuid(), 100, 1]
+        write_state(self.service.state, {'phase': 'running' if running else 'stopped',
+                    'directory': str(run), 'supervisor_birth': birth})
+        write_state(run / 'result.json', {
+            'supervisor_birth': birth, 'launch_agent_restored': {'injected': False},
+            'backend_cleanup': {'attempt': 0, 'cleanup_verified': False,
+                                'cleanup_reason': 'ownership observation deferred'},
+            'decoder_route': {'enabled': True},
+            'decoder_cleanup': {'cleanup_verified': True, 'original_avc_restored': True}})
+        cache = self.root / 'Library/Caches/Mirra'
+        cache.mkdir(parents=True, exist_ok=True, mode=0o700)
+        write_state(cache / 'sharing.json', {'schema_version': 1,
+            'controller_birth': [45, os.getuid(), 90, 1], 'directory': str(missing),
+            'plist_sha256': 'a' * 64})
+        original = {'path': str(ORIGINAL_PLIST), 'program': PROGRAM, 'injected': False}
+        state = {'running': running, 'sharingd': {
+            'path': str(missing / 'sharing.plist'), 'program': PROGRAM, 'injected': True,
+            'environment': {'DYLD_INSERT_LIBRARIES': str(missing / 'keystore.dylib')},
+            'stdout path': str(missing / 'sharingd.stdout.log'),
+            'stderr path': str(missing / 'sharingd.stderr.log')}}
+
+        def command(*arguments):
+            self.assertEqual(arguments, ('bootout', self.service.target))
+            state['running'] = False
+            return subprocess.CompletedProcess([], 0)
+
+        def sharing_command(*arguments, **options):
+            if arguments[0] == 'bootout':
+                state['sharingd'] = {}
+            elif arguments[0] == 'bootstrap':
+                self.assertEqual(arguments[-1], str(ORIGINAL_PLIST))
+                state['sharingd'] = original
+            else:
+                self.fail('Unexpected sharingd mutation: ' + repr(arguments))
+            return subprocess.CompletedProcess([], 0)
+
+        contexts = ExitStack()
+        self.addCleanup(contexts.close)
+        contexts.enter_context(patch.object(self.service, 'registration', side_effect=lambda:
+            {'pid': str(birth[0]), 'path': str(self.service.plist)} if state['running'] else {}))
+        contexts.enter_context(patch.object(self.service, 'command', side_effect=command))
+        contexts.enter_context(patch('installation.process_birth', side_effect=lambda pid:
+            tuple(birth) if pid == birth[0] and state['running'] else None))
+        contexts.enter_context(patch('sharingd.process_birth', return_value=None))
+        contexts.enter_context(patch('supervisor.process_birth', return_value=None))
+        contexts.enter_context(patch.object(decoder_route, 'CACHE', cache))
+        contexts.enter_context(patch.object(decoder_route, 'JOURNAL', cache / 'decoder-route.json'))
+        contexts.enter_context(patch('sharingd.service', side_effect=lambda *a, **kw: dict(state['sharingd'])))
+        contexts.enter_context(patch('sharingd.launchctl', side_effect=sharing_command))
+        contexts.enter_context(patch('installation.subprocess.run', return_value=subprocess.CompletedProcess([], 0)))
+        start = contexts.enter_context(patch.object(self.service, 'start', return_value={}))
+        return cache, run, missing, state, start
+
+    def test_stop_recovers_missing_runtime_after_the_old_support_process_ends(self):
+        cache, run, missing, state, _ = self.missing_runtime_session()
+        result = self.service.stop()
+        self.assertFalse(state['running'])
+        self.assertTrue(result['last_cleanup_verified'])
+        self.assertTrue(self.service.status()['last_cleanup_verified'])
+        self.assertFalse((cache / 'sharing.json').exists())
+        self.assertFalse(missing.exists())
+        record = json.loads((run / 'result.json').read_text())
+        self.assertFalse(record['backend_cleanup']['cleanup_verified'])
+        self.assertEqual(record['backend_cleanup']['cleanup_reason'], 'ownership observation deferred')
+        self.assertTrue(record['cleanup_recovery']['backend_cleanup_verified'])
+
+    def test_saved_update_recovers_the_missing_runtime_and_preserves_bridge_keys(self):
+        cache, _, missing, _, start = self.missing_runtime_session()
+        previous = load_config(self.service.package / 'config.json')
+        credentials = {name: getattr(previous, name).read_bytes() for name in
+                       ('identity_file', 'user_file', 'known_hosts_file', 'certificate_file')}
+        self.service.update_saved()
+        self.assertFalse(self.service.needs_update())
+        self.assertFalse((cache / 'sharing.json').exists())
+        self.assertFalse(missing.exists())
+        start.assert_called_once()
+        current = load_config(self.service.package / 'config.json')
+        self.assertEqual(current, previous)
+        for name, data in credentials.items():
+            self.assertEqual(getattr(current, name).read_bytes(), data)
+
+    def test_already_stopped_missing_runtime_can_be_replaced_with_the_selected_bridge(self):
+        cache, _, missing, _, _ = self.missing_runtime_session(running=False)
+        self.service.stop()
+        selected = replace(self.config, transport='ssh')
+        self.service.prepare(selected, replace_package=True)
+        self.assertEqual(load_config(self.service.package / 'config.json').transport, 'ssh')
+        self.assertFalse((cache / 'sharing.json').exists())
+        self.assertFalse(missing.exists())
+
+    def test_missing_runtime_update_preserves_an_unrecognized_sharingd_job(self):
+        cache, _, _, state, start = self.missing_runtime_session()
+        state['sharingd']['environment'] = {'DYLD_INSERT_LIBRARIES': '/another/adapter.dylib'}
+        before = (self.service.package / 'manifest.json').read_bytes()
+        journal = (cache / 'sharing.json').read_bytes()
+        with self.assertRaises(RuntimeError):
+            self.service.update_saved()
+        self.assertEqual((self.service.package / 'manifest.json').read_bytes(), before)
+        self.assertEqual((cache / 'sharing.json').read_bytes(), journal)
+        self.assertFalse(list(self.service.base.glob('previous-*')))
+        start.assert_not_called()
+
+    def test_recovery_keeps_a_live_workspace_and_can_retry_after_its_lease_ends(self):
+        from workspace import BrokerWorkspace, cleanup
+
+        cache, run, _, state, start = self.missing_runtime_session()
+        backend = run / 'backend-000001'
+        backend.mkdir(mode=0o700)
+        record = json.loads((run / 'result.json').read_text())
+        record['backend_cleanup']['directory'] = backend.name
+        write_state(run / 'result.json', record)
+        workspace = BrokerWorkspace(backend)
+
+        def release_workspace():
+            workspace.close()
+            if workspace.path.exists():
+                cleanup(backend)
+
+        self.addCleanup(release_workspace)
+        before = (self.service.package / 'manifest.json').read_bytes()
+        with self.assertRaisesRegex(RuntimeError, 'workspace is still in use'):
+            self.service.update_saved()
+        self.assertEqual((self.service.package / 'manifest.json').read_bytes(), before)
+        self.assertFalse((cache / 'sharing.json').exists())
+        self.assertTrue(workspace.path.exists())
+        self.assertFalse(self.service.status()['last_cleanup_verified'])
+        start.assert_not_called()
+        workspace.close()
+
+        # Restoration proof cannot authorize cleanup after another job takes over.
+        original = state['sharingd']
+        state['sharingd'] = {'path': '/another/sharing.plist', 'program': '/usr/libexec/sharingd'}
+        with self.assertRaisesRegex(RuntimeError, 'Original sharingd restoration is not verified'):
+            self.service.update_saved()
+        self.assertTrue(workspace.path.exists())
+        self.assertEqual((self.service.package / 'manifest.json').read_bytes(), before)
+        start.assert_not_called()
+
+        state['sharingd'] = original
+        self.service.update_saved()
+        self.assertFalse(workspace.path.exists())
+        self.assertFalse(self.service.needs_update())
+        start.assert_called_once()
+        previous, = self.service.base.glob('previous-*')
+        recovered = json.loads((previous / 'runtime' / run.name / 'result.json').read_text())
+        self.assertFalse(recovered['backend_cleanup']['cleanup_verified'])
+        self.assertTrue(recovered['cleanup_recovery']['backend_cleanup_verified'])
+
+    def test_restoration_proof_for_another_controller_cannot_mark_cleanup_verified(self):
+        _, run, _, _, _ = self.missing_runtime_session(running=False)
+        record = json.loads((run / 'result.json').read_text())
+        record['cleanup_recovery'] = {'backend_cleanup_verified': True,
+                                     'supervisor_birth': [42, os.getuid(), 90, 1]}
+        write_state(run / 'result.json', record)
+        self.assertFalse(self.service.status()['last_cleanup_verified'])
+
     def test_unavailable_gui_domain_keeps_package_and_all_recovery_journals(self):
         cache, _, _ = self.pending_session()
         before = (self.service.package / 'manifest.json').read_bytes()

@@ -20,6 +20,7 @@ from state import write_state
 from compatibility import require_media_profile
 from interpreter import copy_runtime, ENTRYPOINT
 from supervisor import backend_lease, backend_children_stopped
+from workspace import cleanup as cleanup_workspace
 import activity
 
 LABEL = 'local.mirra.agent'
@@ -125,16 +126,16 @@ class NativeService:
                 self.stop()
             with activity.operation('Service', 'update support using saved bridge'):
                 with backend_lease():
-                    self.recover_pending()
                     self.prepare(replace_package=True)
         return self.install()
 
     def recover_pending(self):
         """Restore a stopped installation before moving its journaled runtime."""
         cache = Path.home() / 'Library/Caches/Mirra'
-        if not any((cache / name).exists() for name in ('launch.json', 'sharing.json', 'decoder-route.json')):
-            return
+        pending = any((cache / name).exists() for name in ('launch.json', 'sharing.json', 'decoder-route.json'))
         current = self.status()
+        if not pending and (not current.get('run') or current.get('last_cleanup_verified')):
+            return
         if current.get('registered') or current.get('supervisor_alive'):
             raise RuntimeError('Stop native support before recovering its previous session')
         from launcher import NativeLaunchAgent
@@ -157,7 +158,57 @@ class NativeService:
                 descriptor = decoder_route.acquire()
                 os.close(descriptor)
         with activity.operation('Service', 'recover previous sharing support'):
-            SharingdAgent.recover_abandoned()
+            recovered = SharingdAgent.recover_abandoned()
+        if current.get('run'):
+            self.record_cleanup_recovery(current, recovered)
+
+    def record_cleanup_recovery(self, current, recovered):
+        """Record fresh restoration proof without replacing the controller's failed report."""
+        run = self.package / 'runtime' / current['run']
+        path = run / 'result.json'
+        if not path.exists():
+            return
+        self.private_file(path)
+        data = json.loads(path.read_text())
+        if data.get('supervisor_birth', current['supervisor_birth']) != current['supervisor_birth']:
+            raise RuntimeError('Stopped cleanup report belongs to another controller')
+        if recovered is None:
+            recovery = data.get('cleanup_recovery', {})
+            if recovery.get('supervisor_birth') != current['supervisor_birth']:
+                return
+            recovered = recovery.get('sharingd')
+            if recovered is None:
+                return
+        from sharingd import service, is_original
+        if recovered.get('original_restored') is not True or not is_original(service()):
+            raise RuntimeError('Original sharingd restoration is not verified')
+        previous = Path(recovered['directory'])
+        if (previous.resolve() != previous or previous.parent.parent != self.package / 'runtime'
+                or not previous.parent.name.startswith('native-') or not previous.name.startswith('backend-')):
+            raise RuntimeError('Pending sharingd recovery belongs to another installation; it was preserved')
+        directories = {previous}
+        name = data.get('backend_cleanup', {}).get('directory')
+        if name:
+            if not isinstance(name, str) or Path(name).name != name or not name.startswith('backend-'):
+                raise RuntimeError('Unexpected backend directory during stopped recovery')
+            directories.add(run / name)
+        workspaces = []
+        recovery = {'backend_cleanup_verified': False,
+            'supervisor_birth': current['supervisor_birth'], 'sharingd': recovered,
+            'workspaces': workspaces, 'observed_at': datetime.now().isoformat()}
+        data['cleanup_recovery'] = recovery
+        # Keep restoration proof if a remaining child/lease defers workspace
+        # cleanup: sharingd's journal has already been cleared at this point.
+        write_state(path, data)
+        for directory in sorted(directories):
+            if not backend_children_stopped(directory):
+                raise RuntimeError('Previous backend children are still running; cleanup was deferred')
+            workspace = cleanup_workspace(directory)
+            if workspace.get('reason') == 'lease_in_use':
+                raise RuntimeError('Previous broker workspace is still in use; cleanup was deferred')
+            workspaces.append({'directory': str(directory), **workspace})
+        recovery['backend_cleanup_verified'] = True
+        write_state(path, data)
 
     def validate_source(self):
         for name in ('native.py', 'decoder.py', 'decoder_route.py', 'startup.py'):
@@ -358,6 +409,11 @@ class NativeService:
             time.sleep(.2)
         # Inspect the installed controller's last report, not just job removal.
         current = self.status()
+        if not current.get('last_cleanup_verified'):
+            with activity.operation('Service', 'recover stopped support'):
+                with backend_lease():
+                    self.recover_pending()
+            current = self.status()
         current['login_enabled'] = self.plist.exists()
         if birth is not None and not current.get('last_cleanup_verified'):
             raise RuntimeError('Service process ended but native cleanup is not verified; restart support to recover before removing it')
@@ -407,7 +463,11 @@ class NativeService:
                     launch_clean = launch_clean or (decoder.get('enabled') is True and 'ready' not in decoder
                         and not data.get('launch_agent')
                         and data.get('decoder_cleanup', {}).get('original_avc_restored') is True)
-                value['last_cleanup_verified'] = bool(data.get('backend_cleanup', {}).get('cleanup_verified')
+                recovery = data.get('cleanup_recovery', {})
+                backend_clean = data.get('backend_cleanup', {}).get('cleanup_verified') or (
+                    recovery.get('backend_cleanup_verified') is True
+                    and recovery.get('supervisor_birth') == birth)
+                value['last_cleanup_verified'] = bool(backend_clean
                     and launch_clean and not data.get('launch_agent_restore_error')
                     and not data.get('app_cleanup_error') and not data.get('decoder_restore_error')
                     and (not data.get('decoder_route', {}).get('enabled')

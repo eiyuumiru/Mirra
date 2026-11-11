@@ -22,7 +22,8 @@ from configuration import ROOT
 from processes import process_birth
 from state import write_state
 from lifetime import emit_event
-from sharingd import SharingdAgent
+from sharingd import SharingdAgent, service as sharingd_service, is_original
+from redaction import redact_text
 from workspace import cleanup as cleanup_workspace
 from retention import track, retire, prune
 
@@ -57,22 +58,19 @@ def recovery_gate(previous=None):
         return False, 'previous backend child still running'
     try:
         with backend_lease():
-            reply = subprocess.run(['launchctl', 'print', f'gui/{os.getuid()}/com.apple.sharingd'],
-                                   capture_output=True, text=True, timeout=5)
-            if reply.returncode:
+            current = sharingd_service(timeout=5)
+            if not current:
                 return False, 'sharingd restoration not yet observable'
-            values = {}
-            for line in reply.stdout.splitlines():
-                key, separator, value = line.strip().partition(' = ')
-                if separator:
-                    values.setdefault(key, value)
-            if (values.get('path') != '/System/Library/LaunchAgents/com.apple.sharingd.plist'
-                    or values.get('program') != '/usr/libexec/sharingd'
-                    or 'DYLD_INSERT_LIBRARIES' in reply.stdout or 'MIRRA_KEYSTORE' in reply.stdout):
+            if not is_original(current):
                 return False, 'sharingd is not in its original configuration'
     except BlockingIOError:
         return False, 'backend controller still owns sharingd'
     return True, None
+
+
+def _observation_error(error):
+    return {'error_type': type(error).__name__, 'error': redact_text(str(error)),
+            'errno': getattr(error, 'errno', None)}
 
 
 class NativeBackend:
@@ -148,16 +146,19 @@ class NativeBackend:
         delay = 2
         try:
             while not self.stop.is_set():
+                observation = None
                 try:
                     recovered = SharingdAgent.recover_abandoned()
                     if recovered:
                         emit_event({'ABANDONED_SHARINGD_RECOVERED': recovered})
                     allowed, reason = recovery_gate(previous)
-                except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+                except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
                     allowed, reason = False, 'ownership observation deferred'
+                    observation = _observation_error(error)
                 if not allowed:
-                    if self.snapshot().get('reason') != reason:
-                        self.publish('waiting_for_cleanup', reason=reason)
+                    state = self.snapshot()
+                    if state.get('reason') != reason or state.get('observation_error') != observation:
+                        self.publish('waiting_for_cleanup', reason=reason, observation_error=observation)
                     if not self.recover:
                         raise RuntimeError(reason)
                     self.stop.wait(2)
@@ -184,7 +185,7 @@ class NativeBackend:
                 (current / 'keystore.dylib').chmod(0o600)
                 self.publish('starting', attempt=attempt, directory=current.name,
                              reason=None, worker_pid=None, controller_pid=None,
-                             worker_birth=None, exit_code=None, retry_seconds=None)
+                             worker_birth=None, exit_code=None, retry_seconds=None, observation_error=None)
                 limits = BoundedLogs(on_error=self.stop.set)
                 try:
                     with open_append(current / 'backend.log', binary=True) as output:
@@ -248,7 +249,8 @@ class NativeBackend:
                 else:
                     result['cleanup_verified'] = False
                     result['cleanup_reason'] = 'broker workspace is still in use'
-        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
             result['cleanup_verified'] = False
             result['cleanup_reason'] = 'ownership observation deferred'
+            result['cleanup_observation_error'] = _observation_error(error)
         return result
