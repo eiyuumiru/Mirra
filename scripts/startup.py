@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import signal
 import stat
+import subprocess
 import threading
 
 from lifetime import emit_event
@@ -15,6 +16,47 @@ class StartupError(RuntimeError):
     def __init__(self, code, message):
         super().__init__(message)
         self.code = code
+
+
+def mirroring_running():
+    try:
+        result = subprocess.run(['pgrep', '-x', 'iPhone Mirroring'],
+                                capture_output=True, timeout=5)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise StartupError('mirroring_observation_failed',
+                           'Could not check whether iPhone Mirroring is open') from error
+    if result.returncode not in (0, 1):
+        raise StartupError('mirroring_observation_failed',
+                           'Could not check whether iPhone Mirroring is open')
+    return result.returncode == 0
+
+
+def wait_for_mirroring_exit(stop, state_path):
+    """Wait before session mutations, without retrying failed preparation."""
+    state_path = Path(state_path)
+    birth = process_birth(os.getpid())
+
+    def phase(value):
+        state = json.loads(state_path.read_text())
+        if state.get('supervisor_birth') != list(birth) or 'directory' in state:
+            raise RuntimeError('Support state changed owners or session preparation already began')
+        state['phase'] = value
+        write_state(state_path, state)
+
+    waiting = False
+    while not stop.is_set():
+        if not mirroring_running():
+            if waiting:
+                # Restore the failure latch before any recovery or preparation.
+                phase('startup_checks')
+                emit_event({'NATIVE_STARTUP_RESUMED': True})
+            return not stop.is_set()
+        if not waiting:
+            phase('waiting_for_mirroring_exit')
+            emit_event({'NATIVE_STARTUP_WAITING': 'Quit iPhone Mirroring to continue'})
+            waiting = True
+        stop.wait(.5)
+    return False
 
 
 def require_container(path):
@@ -43,7 +85,10 @@ def run_service(session, state_path, stop=None):
     stop = stop if stop is not None else threading.Event()
     birth = process_birth(os.getpid())
     previous = json.loads(state_path.read_text()) if state_path.exists() else {}
-    interrupted = previous.get('phase') in ('startup_checks', 'preparing', 'startup_failed')
+    # Waiting for an app to quit performs no session mutations or privacy
+    # requests, so only that pre-preparation wait may resume after abrupt death.
+    interrupted = (previous.get('phase') in ('startup_checks', 'preparing', 'startup_failed')
+                   or (previous.get('phase') == 'waiting_for_mirroring_exit' and 'directory' in previous))
     state = {'phase': 'startup_checks', 'supervisor_birth': birth}
     if interrupted and 'directory' in previous:
         state['directory'] = previous['directory']

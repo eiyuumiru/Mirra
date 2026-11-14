@@ -167,19 +167,6 @@ class SupportStatusTests(unittest.TestCase):
         self.assertNotIn('/Users/private', json.dumps(result))
         self.assertNotIn('secret', json.dumps(result))
 
-    def test_startup_failure_is_actionable_without_claiming_readiness(self):
-        self.snapshot.update(native_launch_support_ready=False, backend_ready=False)
-        for code in ('container_access_denied', 'container_missing', 'startup_interrupted',
-                     'support_access_denied', 'support_startup_failed', 'PRIVATE unknown reason'):
-            self.snapshot['startup_failure'] = code
-            with patch('readiness.health') as health:
-                result = observe(self.service)
-            self.assertEqual(result['state'], 'startup_failed')
-            self.assertIn('stop', result['actions'])
-            self.assertNotIn('open_mirroring', result['actions'])
-            self.assertNotIn('PRIVATE', json.dumps(result))
-            health.assert_not_called()
-
     def test_changed_installation_does_not_read_or_start_backend(self):
         self.service.validate_package.side_effect = RuntimeError('PRIVATE changed file')
         result = observe(self.service)
@@ -192,6 +179,55 @@ class SupportStatusTests(unittest.TestCase):
         result = observe(self.service)
         self.assertEqual(result['state'], 'unknown')
         self.assertNotIn('/private/key', json.dumps(result))
+
+
+class StartupStatusTests(unittest.TestCase):
+    # Startup has no backend socket yet. Its status needs only installed files
+    # and a supervisor observation, unlike the running-session fixture above.
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        root = Path(self.temp.name)
+        self.service = NativeService(root / 'installed', root)
+        self.service.package.mkdir(parents=True, mode=0o700)
+        write_state(self.service.package / 'config.json', {'backend': {'transport': 'ssh'}})
+        self.service.validate_package = Mock(return_value={
+            'schema_version': PACKAGE_SCHEMA, 'support_revision': SUPPORT_REVISION})
+        self.snapshot = {'registered': True, 'supervisor_alive': True,
+                         'native_launch_support_ready': False, 'backend_ready': False}
+        self.service.status = Mock(side_effect=lambda: dict(self.snapshot))
+
+    def test_startup_failure_is_actionable_without_claiming_readiness(self):
+        for code in ('container_access_denied', 'container_missing', 'startup_interrupted',
+                     'support_access_denied', 'support_startup_failed',
+                     'mirroring_observation_failed', 'PRIVATE unknown reason'):
+            self.snapshot['startup_failure'] = code
+            with patch('readiness.health') as health:
+                result = observe(self.service)
+            self.assertEqual(result['state'], 'startup_failed')
+            self.assertIn('stop', result['actions'])
+            self.assertNotIn('open_mirroring', result['actions'])
+            self.assertNotIn('PRIVATE', json.dumps(result))
+            health.assert_not_called()
+
+    def test_open_app_wait_has_quit_guidance_without_querying_backend(self):
+        self.snapshot['phase'] = 'waiting_for_mirroring_exit'
+        with patch('readiness.health') as health:
+            result = observe(self.service)
+        self.assertEqual(result['state'], 'waiting_for_mirroring_exit')
+        self.assertIn('Command-Q', result['detail'])
+        self.assertEqual(result['actions'], ['refresh', 'stop'])
+        self.assertIsNone(result['mirroring_connection_verified'])
+        health.assert_not_called()
+        self.snapshot['supervisor_alive'] = False
+        self.assertEqual(observe(self.service)['state'], 'starting')
+
+    def test_failure_takes_precedence_over_a_wait_marker(self):
+        self.snapshot.update(phase='waiting_for_mirroring_exit', startup_failure='container_access_denied')
+        result = observe(self.service)
+        self.assertEqual(result['state'], 'startup_failed')
+        self.assertIn('stop', result['actions'])
+        self.assertNotIn('open_mirroring', result['actions'])
 
 
 if __name__ == '__main__':

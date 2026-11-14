@@ -28,7 +28,7 @@ from logs import BoundedLogs,open_append
 from retention import track,retire,prune
 from compatibility import require_media_profile, supported_apple_app
 from decoder import DecoderRoute
-from startup import StartupError, require_container, run_service
+from startup import StartupError, mirroring_running, require_container, run_service, wait_for_mirroring_exit
 
 
 def main():
@@ -61,11 +61,16 @@ def run_session(parser,args,requested_stop):
     duration=duration_from_arguments(parser,args,config.seconds)
     if config.system_app!=Path('/System/Applications/iPhone Mirroring.app'):
         parser.error('The native path currently targets the installed system app')
+    managed_startup=bool(args.launch_services and args.service_state)
     if args.launch_services:
         try:recovered=NativeLaunchAgent.recover_abandoned()
         except (OSError,RuntimeError,ValueError) as error:parser.error(str(error))
         if recovered:print(json.dumps({'ABANDONED_NATIVE_SESSION_RECOVERED':recovered}),flush=True)
-    if subprocess.run(['pgrep','-x','iPhone Mirroring'],capture_output=True).returncode==0:
+    # Existing recovery closes apps owned by an abandoned session first. A
+    # normal app opened before support instead waits without latching failure.
+    if managed_startup:
+        if not wait_for_mirroring_exit(requested_stop,args.service_state):return 0
+    elif mirroring_running():
         parser.error('Close the existing Mirroring app before starting a native session')
     info=plistlib.loads((config.system_app/'Contents/Info.plist').read_bytes())
     if not supported_apple_app(info):

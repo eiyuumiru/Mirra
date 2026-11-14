@@ -7,12 +7,98 @@ import subprocess
 import signal
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from startup import require_container, StartupError
+from startup import mirroring_running, require_container, StartupError, wait_for_mirroring_exit
+from state import write_state
+
+
+class MirroringStartupTests(unittest.TestCase):
+    def test_process_observation_distinguishes_absent_from_failed(self):
+        for result, expected in ((0, True), (1, False)):
+            with patch('startup.subprocess.run', return_value=subprocess.CompletedProcess([], result)) as run:
+                self.assertEqual(mirroring_running(), expected)
+                self.assertEqual(run.call_args.kwargs['timeout'], 5)
+        for failure in (OSError('failed'), subprocess.TimeoutExpired('pgrep', 5),
+                        subprocess.CompletedProcess([], 2)):
+            with self.subTest(failure=failure), patch('startup.subprocess.run') as run:
+                if isinstance(failure, Exception):
+                    run.side_effect = failure
+                else:
+                    run.return_value = failure
+                with self.assertRaises(StartupError) as caught:
+                    mirroring_running()
+                self.assertEqual(caught.exception.code, 'mirroring_observation_failed')
+
+    def test_wait_cannot_overwrite_another_owner_or_a_prepared_session(self):
+        with tempfile.TemporaryDirectory() as folder:
+            state = Path(folder) / 'state.json'
+            for data in ({'supervisor_birth': [43]},
+                         {'supervisor_birth': [42], 'directory': 'native-example'}):
+                write_state(state, dict(data, phase='startup_checks'))
+                before = state.read_bytes()
+                with patch('startup.process_birth', return_value=(42,)), \
+                        patch('startup.mirroring_running', return_value=True):
+                    with self.assertRaises(RuntimeError):
+                        wait_for_mirroring_exit(threading.Event(), state)
+                self.assertEqual(state.read_bytes(), before)
+
+    def test_native_recovers_abandoned_apps_before_waiting_or_preparing(self):
+        import native
+        from configuration import load_config
+        with tempfile.TemporaryDirectory() as folder:
+            config_path = Path(folder) / 'config.json'
+            config_path.write_text('{}')
+            config = load_config(config_path)
+            args = argparse.Namespace(recover_backend=True, launch_services=True,
+                config=str(config_path), manage_usb=False, seconds=None,
+                until_stopped=True, service_state=str(Path(folder) / 'service.json'))
+            for continued in (False, True):
+                with patch('native.load_config', return_value=config), \
+                        patch('native.Path.read_bytes', return_value=b'fixture'), \
+                        patch('native.plistlib.loads', return_value={}), \
+                        patch('native.wait_for_mirroring_exit') as wait, \
+                        patch('native.NativeLaunchAgent.recover_abandoned', return_value=[]) as recover, \
+                        patch('native.require_container') as container:
+                    parser = argparse.ArgumentParser()
+                    def after_recovery(*_):
+                        recover.assert_called_once()
+                        return continued
+                    wait.side_effect = after_recovery
+                    if continued:
+                        with patch.object(parser, 'error', side_effect=RuntimeError('validation reached')):
+                            with self.assertRaisesRegex(RuntimeError, 'validation reached'):
+                                native.run_session(parser, args, threading.Event())
+                    else:
+                        self.assertEqual(native.run_session(parser, args, threading.Event()), 0)
+                    recover.assert_called_once()
+                    wait.assert_called_once()
+                    container.assert_not_called()
+
+    def test_plain_cli_keeps_existing_open_app_guard(self):
+        import native
+        from configuration import load_config
+        with tempfile.TemporaryDirectory() as folder:
+            config_path = Path(folder) / 'config.json'
+            config_path.write_text('{}')
+            args = argparse.Namespace(recover_backend=True, launch_services=True,
+                config=str(config_path), manage_usb=False, seconds=None,
+                until_stopped=True, service_state=None)
+            with patch('native.load_config', return_value=load_config(config_path)), \
+                    patch('native.mirroring_running', return_value=True), \
+                    patch('native.wait_for_mirroring_exit') as wait, \
+                    patch('native.NativeLaunchAgent.recover_abandoned', return_value=[]) as recover:
+                parser = argparse.ArgumentParser()
+                with patch.object(parser, 'error', side_effect=RuntimeError('open app')) as error:
+                    with self.assertRaisesRegex(RuntimeError, 'open app'):
+                        native.run_session(parser, args, threading.Event())
+                self.assertIn('Close the existing Mirroring app', error.call_args.args[0])
+                wait.assert_not_called()
+                recover.assert_called_once()
 
 
 class ContainerTests(unittest.TestCase):
@@ -91,7 +177,8 @@ class StartupProcessTests(unittest.TestCase):
     def launch(self, body):
         script = ('import sys\nfrom pathlib import Path\n'
                   f'sys.path.insert(0, {str(Path(__file__).resolve().parents[1] / "scripts")!r})\n'
-                  'from startup import run_service, StartupError\n'
+                  'from startup import run_service, StartupError, wait_for_mirroring_exit\n'
+                  'from unittest.mock import patch\n'
                   'from state import write_state\nimport json\n'
                   f'state=Path({str(self.state)!r})\n'
                   'def session(stop):\n'
@@ -133,6 +220,75 @@ class StartupProcessTests(unittest.TestCase):
                 stopped = json.loads(self.state.read_text())
                 self.assertEqual(stopped['phase'], 'stopped')
                 self.assertTrue(stopped['startup_cleanup_verified'])
+
+    def waiting_session(self):
+        return (f'with patch("startup.mirroring_running", side_effect=lambda: Path({str(self.root / "app-open")!r}).exists()):\n'
+                '    if not wait_for_mirroring_exit(stop, state): return 0\n'
+                'data=json.loads(state.read_text())\n'
+                'assert data["phase"] == "startup_checks"\n'
+                'data.update(phase="preparing", directory="native-example")\n'
+                'write_state(state,data)\nstop.wait()\nreturn 0')
+
+    def test_open_app_wait_continues_in_same_process_after_quit(self):
+        app = self.root / 'app-open'; app.touch()
+        child = self.launch(self.waiting_session())
+        waiting = self.wait_state(child, 'waiting_for_mirroring_exit')
+        self.assertNotIn('directory', waiting)
+        self.assertNotIn('startup_failure', waiting)
+        app.unlink()
+        prepared = self.wait_state(child, 'preparing')
+        self.assertEqual(prepared['supervisor_birth'], waiting['supervisor_birth'])
+        self.assertEqual(self.calls.read_text(), 'attempt\n')
+        child.terminate(); self.assertEqual(child.wait(timeout=5), 0)
+
+    def test_stop_cancels_wait_without_preparing_a_session(self):
+        (self.root / 'app-open').touch()
+        child = self.launch(self.waiting_session())
+        self.wait_state(child, 'waiting_for_mirroring_exit')
+        child.terminate(); self.assertEqual(child.wait(timeout=5), 0)
+        state = json.loads(self.state.read_text())
+        self.assertEqual(state['phase'], 'stopped')
+        self.assertTrue(state['startup_cleanup_verified'])
+        self.assertNotIn('directory', state)
+        self.assertNotIn('startup_failure', state)
+
+    def test_killed_app_wait_can_resume_without_rearming_permission_failures(self):
+        app = self.root / 'app-open'; app.touch()
+        first = self.launch(self.waiting_session())
+        self.wait_state(first, 'waiting_for_mirroring_exit')
+        first.kill(); first.wait(timeout=5)
+        second = self.launch(self.waiting_session())
+        self.wait_state(second, 'waiting_for_mirroring_exit')
+        app.unlink()
+        self.wait_state(second, 'preparing')
+        self.assertEqual(self.calls.read_text(), 'attempt\nattempt\n')
+        second.terminate(); self.assertEqual(second.wait(timeout=5), 0)
+
+    def test_wait_marker_with_existing_preparation_cannot_discard_cleanup_evidence(self):
+        write_state(self.state, {'phase': 'waiting_for_mirroring_exit',
+                    'directory': 'native-example', 'supervisor_birth': [43]})
+        child = self.launch('raise AssertionError("must not resume preparation")')
+        state = self.wait_state(child, 'startup_failed')
+        self.assertEqual(state['startup_failure'], 'startup_interrupted')
+        self.assertEqual(state['directory'], 'native-example')
+        self.assertFalse(self.calls.exists())
+
+    def test_process_observation_failure_pauses_instead_of_preparing(self):
+        child = self.launch('with patch("startup.subprocess.run", side_effect=OSError("failed")):\n'
+                            '    wait_for_mirroring_exit(stop, state)\n'
+                            'raise AssertionError("must not prepare")')
+        state = self.wait_state(child, 'startup_failed')
+        self.assertEqual(state['startup_failure'], 'mirroring_observation_failed')
+        self.assertNotIn('directory', state)
+        with self.assertRaises(subprocess.TimeoutExpired):
+            child.wait(timeout=.15)
+        self.assertEqual(self.calls.read_text(), 'attempt\n')
+
+    def test_stop_before_wait_does_not_observe_app(self):
+        stop = threading.Event(); stop.set()
+        with patch('startup.mirroring_running') as observe:
+            self.assertFalse(wait_for_mirroring_exit(stop, self.state))
+        observe.assert_not_called()
 
     def test_killed_waiting_process_does_not_reprompt_on_launchd_restart(self):
         first = self.launch('raise PermissionError("denied")')

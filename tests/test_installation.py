@@ -79,6 +79,19 @@ class NativeServiceTests(unittest.TestCase):
             self.assertEqual(value['last_cleanup_verified'], not alive)
             self.assertEqual(value['startup_failure'], 'container_access_denied')
 
+    def test_waiting_for_open_app_is_observable_without_claiming_readiness(self):
+        self.service.base.mkdir(parents=True)
+        birth = (42, os.getuid(), 100, 1)
+        write_state(self.service.state, {'phase': 'waiting_for_mirroring_exit', 'supervisor_birth': birth})
+        with patch.object(self.service, 'registration', return_value={'registered': True}), \
+                patch('installation.process_birth', return_value=birth):
+            value = self.service.status()
+        self.assertEqual(value['phase'], 'waiting_for_mirroring_exit')
+        self.assertTrue(value['supervisor_alive'])
+        self.assertFalse(value['native_launch_support_ready'])
+        self.assertFalse(value['backend_ready'])
+        self.assertNotIn('startup_failure', value)
+
     def test_legacy_decoder_startup_failure_does_not_require_unstarted_launch_agent_restore(self):
         run = self.service.package / 'runtime/native-fixture'
         run.mkdir(parents=True, mode=0o700)

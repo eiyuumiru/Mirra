@@ -134,7 +134,8 @@ int main(void) {
             @[@"stopped", @[@"start", @"setup"], @"Connect", @"start"],
             @[@"stopped", @[@"install", @"setup"], @"Connect", @"install"],
             @[@"setup_required", @[@"setup"], @"Set up Mirra", @"setup"],
-            @[@"unknown", @[@"refresh", @"guide"], @"Check again", @"status"]
+            @[@"unknown", @[@"refresh", @"guide"], @"Check again", @"status"],
+            @[@"waiting_for_mirroring_exit", @[@"refresh", @"stop"], @"Check again", @"status"]
         ];
         for (NSArray *scenario in cases) {
             app.lastAction = nil;
@@ -146,6 +147,10 @@ int main(void) {
         }
         [app applyReport:@{@"state": @"waiting_for_bridge", @"actions": @[@"refresh", @"stop", @"guide"]}];
         require(!app.connectButton.enabled, @"Waiting must not start another service");
+        [app applyReport:@{@"state": @"waiting_for_mirroring_exit", @"actions": @[@"refresh", @"stop"]}];
+        require([app.headline.stringValue isEqual:@"Quit iPhone Mirroring"]
+                && [app.detail.stringValue containsString:@"Command-Q"] && !app.stopButton.hidden,
+                @"Open app wait lost its quit instruction or Stop action");
         app.busy = YES; [app applyReport:@{@"state": @"ready", @"actions": @[@"open_mirroring"]}];
         require(!app.connectButton.enabled && !app.settingsButton.enabled, @"Overlapping actions were not disabled");
         app.busy = NO; [app applyReport:@{@"state": @"ready", @"actions": @[@"open_mirroring", @"stop"]}];

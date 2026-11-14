@@ -99,6 +99,10 @@ def observe(service=None, *, timeout=2):
                 'Automatic retries are paused after a support failure. Check the service log for the reason, then go back to Settings and stop and start support.'))
             return report('startup_failed', title, detail,
                           actions=('stop', 'refresh', 'guide'), transport=transport)
+        if before.get('supervisor_alive') and before.get('phase') == 'waiting_for_mirroring_exit':
+            return report('waiting_for_mirroring_exit', 'Quit iPhone Mirroring',
+                          'Quit Apple’s iPhone Mirroring with Command-Q. Support will continue automatically; wait until Mirra is ready before opening it again.',
+                          actions=('refresh', 'stop'), transport=transport)
         if not before.get('supervisor_alive') or not before.get('native_launch_support_ready'):
             return report('starting', 'Preparing app support',
                           'The background service is starting or restoring its previous session. Check again shortly.',

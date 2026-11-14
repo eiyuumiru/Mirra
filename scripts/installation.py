@@ -30,7 +30,7 @@ HOST_TOOLS = ['inspector']
 DECODER_ADAPTERS = ['decoder-route.dylib']
 PACKAGE_ADAPTERS = ADAPTERS + DECODER_ADAPTERS
 PACKAGE_SCHEMA = 5
-SUPPORT_REVISION = 25
+SUPPORT_REVISION = 26
 
 
 class NativeService:
@@ -438,11 +438,11 @@ class NativeService:
         state = json.loads(self.state.read_text())
         birth = state['supervisor_birth']
         alive = process_birth(birth[0]) == tuple(birth)
-        value.update(supervisor_alive=alive, supervisor_birth=birth)
+        value.update(supervisor_alive=alive, supervisor_birth=birth, phase=state['phase'])
         if state.get('startup_failure'):
             value['startup_failure'] = state['startup_failure']
         if 'directory' not in state:
-            if state['phase'] not in ('startup_checks', 'startup_failed', 'stopped'):
+            if state['phase'] not in ('startup_checks', 'waiting_for_mirroring_exit', 'startup_failed', 'stopped'):
                 raise RuntimeError('Unexpected native startup state')
             value['last_cleanup_verified'] = bool(not alive and state.get('startup_cleanup_verified'))
             return value

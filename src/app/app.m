@@ -195,12 +195,13 @@
 - (void)separator:(NSStackView *)stack { NSBox *line = [[NSBox alloc] init]; line.boxType = NSBoxSeparator; MirraAdd(stack,line); }
 - (NSString *)primaryAction {
     NSArray *actions = self.report[@"actions"] ?: @[];
+    NSString *state = self.report[@"state"] ?: @"";
     if ([actions containsObject:@"open_mirroring"]) return @"open";
-    if ([self.report[@"state"] isEqual:@"setup_required"]) return @"setup";
+    if ([state isEqual:@"setup_required"]) return @"setup";
     if ([actions containsObject:@"start"]) return @"start";
     if ([actions containsObject:@"install"]) return @"install";
-    if ([self.report[@"state"] isEqual:@"unknown"] || [self.report[@"state"] isEqual:@"helper_unavailable"]) return @"refresh";
-    if ([actions containsObject:@"guide"] && ![self.report[@"state"] isEqual:@"waiting_for_bridge"] && ![self.report[@"state"] isEqual:@"restoring"]) return @"settings";
+    if ([@[@"unknown", @"helper_unavailable", @"waiting_for_mirroring_exit"] containsObject:state]) return @"refresh";
+    if ([actions containsObject:@"guide"] && ![@[@"waiting_for_bridge", @"restoring"] containsObject:state]) return @"settings";
     return @"wait";
 }
 - (void)applyReport:(NSDictionary *)report {
@@ -216,6 +217,7 @@
         @"setup_required": @[@"Welcome to Mirra", @"Set up your connection once. We’ll guide you through it."],
         @"checking": @[@"Getting things ready", @"Checking your connection…"],
         @"starting": @[@"Getting things ready", @"Your connection is starting. This may take a moment."],
+        @"waiting_for_mirroring_exit": @[@"Quit iPhone Mirroring", @"Press Command-Q in iPhone Mirroring. Mirra will continue automatically once it closes."],
         @"stopping": @[@"Finishing up", @"Your connection is shutting down."],
         @"restoring": @[@"Reconnecting", @"Finishing the previous session before trying again."],
         @"waiting_for_bridge": @[@"Waiting for your connection", @"Keep your setup phone online. Mirra will retry automatically."],
@@ -246,6 +248,7 @@
         @"update_available": @"Update available",
         @"checking": @"Checking…", @"starting": @"Starting…", @"stopping": @"Stopping…",
         @"waiting_for_bridge": @"Waiting…", @"restoring": @"Reconnecting…", @"recovering": @"Reconnecting…",
+        @"waiting_for_mirroring_exit": @"Quit iPhone Mirroring",
         @"unknown": @"Status unavailable", @"helper_unavailable": @"Status unavailable"};
     self.settingsStatus.stringValue = statusTitles[state] ?: @"Needs attention";
     if (self.busy || [action isEqual:@"wait"]) [self.progress startAnimation:nil]; else [self.progress stopAnimation:nil];
