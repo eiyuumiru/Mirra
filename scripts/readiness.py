@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 from health import health
 from configuration import load_config
-from processes import process_birth
+from processes import NativeAppObserver, process_birth
 from launcher import NativeLaunchAgent, AGENT
 from installation import NativeService
 from activity import emit
@@ -44,6 +44,32 @@ def broker_socket(service, directory):
     if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
         raise ValueError('Unexpected broker socket')
     return endpoint
+
+
+def mirroring_needs_relaunch(configuration, run, backend, children):
+    if type(backend.get('attempt')) is not int or backend['attempt'] < 1:
+        raise ValueError('Invalid backend attempt')
+    if backend['attempt'] == 1:
+        return False
+    birth = children['sharingd']
+    if (not isinstance(birth, list) or len(birth) != 4 or any(type(value) is not int for value in birth)
+            or birth[0] <= 0 or birth[1] != os.getuid() or birth[2] <= 0 or not 0 <= birth[3] < 1000000
+            or process_birth(birth[0]) != tuple(birth)):
+        raise ValueError('Recovered sharingd changed during observation')
+    observer = NativeAppObserver(configuration.system_app / 'Contents/MacOS/iPhone Mirroring',
+                                 run / 'sockets.dylib')
+    pids = observer.poll()
+    if observer.last_errors:
+        raise RuntimeError('Mirroring app observation did not finish')
+    stale = False
+    for pid in pids:
+        identity = observer.verified[pid]
+        if observer.identity(pid) != identity:
+            raise RuntimeError('Mirroring app changed during observation')
+        stale = stale or identity[1:] <= tuple(birth[2:])
+    if process_birth(birth[0]) != tuple(birth):
+        raise ValueError('Recovered sharingd changed during observation')
+    return stale
 
 
 def observe(service=None, *, timeout=2):
@@ -132,6 +158,8 @@ def observe(service=None, *, timeout=2):
         endpoint = broker_socket(service, directory)
         response = health(endpoint, timeout)
         launch = NativeLaunchAgent(run, {}).state()
+        relaunch = (response.get('ready') is True
+                    and mirroring_needs_relaunch(configuration, run, backend, children))
         after = service.status()
         current = read_private(service, run / 'backend-status.json')
         if (before != after or backend != current or process_birth(birth[0]) != tuple(birth)
@@ -150,6 +178,10 @@ def observe(service=None, *, timeout=2):
                           actions=('refresh', 'stop', 'guide'), transport=transport)
         if response.get('ready') is not True:
             raise ValueError('Unknown broker health')
+        if relaunch:
+            return report('waiting_for_mirroring_exit', 'Quit iPhone Mirroring',
+                          'Support has reconnected. Quit Apple’s iPhone Mirroring with Command-Q to close the previous session, then refresh Mirra and choose Connect to start a fresh one.',
+                          actions=('refresh', 'stop'), transport=transport)
         return report('ready', 'Bridge is ready',
                       'Choose Connect to find your iPhone in Apple’s iPhone Mirroring. Keep it locked and nearby, with Wi-Fi and Bluetooth on. The bridge is available; the iPhone connection is not yet confirmed.',
                       actions=('open_mirroring', 'refresh', 'stop'), transport=transport)

@@ -1,12 +1,15 @@
 import json
+from contextlib import redirect_stdout
+import io
 import os
 from pathlib import Path
+import runpy
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from configuration import load_config
@@ -26,11 +29,13 @@ class RecoveryGateTests(unittest.TestCase):
 
     def test_live_previous_child_prevents_retry(self):
         birth = [123, os.getuid(), 50, 6]
-        (self.root / 'backend-children.json').write_text(json.dumps({'broker': birth}))
-        with patch('supervisor.process_birth', return_value=tuple(birth)), \
-                patch('supervisor.subprocess.run') as command:
-            self.assertFalse(recovery_gate(self.root)[0])
-            command.assert_not_called()
+        for child in ('broker', 'sharingd'):
+            with self.subTest(child=child):
+                (self.root / 'backend-children.json').write_text(json.dumps({child: birth}))
+                with patch('supervisor.process_birth', return_value=tuple(birth)), \
+                        patch('supervisor.subprocess.run') as command:
+                    self.assertFalse(recovery_gate(self.root)[0])
+                    command.assert_not_called()
 
     def test_pid_reuse_does_not_block_restored_session(self):
         (self.root / 'backend-children.json').write_text(json.dumps({'broker': [123, os.getuid(), 50, 6]}))
@@ -86,6 +91,68 @@ class RecoveryGateTests(unittest.TestCase):
         self.assertIn('missing-runtime', waiting[0]['observation_error']['error'])
         self.assertFalse(cleanup['cleanup_verified'])
         self.assertEqual(cleanup['cleanup_observation_error']['error_type'], 'FileNotFoundError')
+
+
+class BackendReadinessTests(unittest.TestCase):
+    def run_backend(self, *, sharingd_alive=True):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        (root / 'config.json').write_text('{}')
+        config = load_config(root / 'config.json', root=root)
+        private = root / 'private'; private.mkdir(mode=0o700)
+        workspace = Mock(path=private, lease=99)
+        broker = Mock(pid=101)
+        broker.poll.return_value = None
+        controller = Mock(pid=102)
+        controller.poll.return_value = None
+        controller.wait.return_value = 0
+        controller.stdout = [json.dumps({'WORKSPACE_RUNNING': {'state': {'pid': '103'}}}) + '\n']
+        limits = Mock(); limits.close.return_value = {}
+        output = io.StringIO()
+        lock = (root / 'session.lock').open('a')
+        self.addCleanup(lock.close)
+        original_open = Path.open
+        def open_path(path, *args, **kwargs):
+            return lock if path.name == 'session.lock' else original_open(path, *args, **kwargs)
+        def birth(pid):
+            if pid == 103 and not sharingd_alive:
+                return None
+            return (pid, os.getuid(), 110, pid)
+        original = subprocess.CompletedProcess([], 0,
+            f'path = {ORIGINAL_PLIST}\nprogram = {PROGRAM}\n', '')
+        with patch('configuration.load_config', return_value=config), \
+                patch('workspace.BrokerWorkspace', return_value=workspace), \
+                patch('workspace.cleanup', return_value={'removed': False}), \
+                patch('processes.process_birth', side_effect=birth), \
+                patch('logs.BoundedLogs', return_value=limits), \
+                patch('health.health', return_value={'ready': True}), \
+                patch('health.wait_for_backend_loss', return_value=None), \
+                patch('subprocess.Popen', side_effect=[broker, controller]), \
+                patch('subprocess.run', return_value=original), \
+                patch('signal.signal'), patch('pathlib.Path.home', return_value=root), \
+                patch('pathlib.Path.open', new=open_path), \
+                patch('sys.argv', ['backend.py', '--config', str(config.source)]), redirect_stdout(output):
+            if sharingd_alive:
+                namespace = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'scripts/backend.py'))
+                namespace['session_lock'].close()
+            else:
+                with self.assertRaisesRegex(RuntimeError, 'sharingd ended before backend readiness'):
+                    runpy.run_path(str(Path(__file__).resolve().parents[1] / 'scripts/backend.py'))
+        record = json.loads((config.runtime_directory / 'backend-children.json').read_text())
+        events = [json.loads(line) for line in output.getvalue().splitlines()]
+        workspace.close.assert_called_once()
+        return record, events
+
+    def test_backend_records_the_replacement_sharingd_before_reporting_ready(self):
+        record, events = self.run_backend()
+        self.assertEqual(record['sharingd'], [103, os.getuid(), 110, 103])
+        self.assertTrue(any(event.get('NATIVE_WORKSPACE_READY') for event in events))
+
+    def test_backend_does_not_report_ready_when_the_replacement_sharingd_has_exited(self):
+        record, events = self.run_backend(sharingd_alive=False)
+        self.assertNotIn('sharingd', record)
+        self.assertFalse(any(event.get('NATIVE_WORKSPACE_READY') for event in events))
 
 
 class BackendWorkerTests(unittest.TestCase):

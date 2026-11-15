@@ -12,7 +12,7 @@ def check(service, *, observer=observe):
     report = observer(service)
     emit('Connection check', 'bridge result', state=report['state'])
     if report['state'] != 'ready':
-        return {'state': 'blocked', 'title': 'Your setup phone isn’t ready',
+        return {'state': 'blocked', 'title': report.get('title', 'Your setup phone isn’t ready'),
                 'message': report['detail'], 'report': report}
     return {'state': 'ready', 'report': report,
             'mirroring_connection_verified': None}

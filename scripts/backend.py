@@ -87,11 +87,12 @@ record = {"wrapper_pid": os.getpid(), "duration_seconds": duration, "run": RUN,
 children = {}
 
 
-def record_child(name, process):
-    birth = process_birth(process.pid)
+def record_child(name, pid):
+    birth = process_birth(pid)
     if birth is not None:
         children[name] = birth
         write_state(WORKSPACE / 'backend-children.json', children)
+    return birth
 
 
 try:
@@ -103,7 +104,7 @@ try:
                                   stdin=subprocess.PIPE, stdout=output, stderr=subprocess.STDOUT, text=True,
                                   pass_fds=(workspace.lease,))
         record["broker_pid"] = broker.pid
-        record_child('broker', broker)
+        record_child('broker', broker.pid)
         deadline = time.monotonic() + 13 + 3 * configuration.timeout
         while time.monotonic() < deadline:
             if stopping:
@@ -126,7 +127,7 @@ try:
             controller = subprocess.Popen(controller_command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                           stderr=subprocess.STDOUT, text=True, bufsize=1,
                                           pass_fds=(workspace.lease,))
-            record_child('controller', controller)
+            record_child('controller', controller.pid)
             record.update(controller_pid=controller.pid, broker_log=broker_log.name,
                           controller_log=control_log.name)
             threading.Thread(target=monitor_backend, daemon=True).start()
@@ -137,6 +138,11 @@ try:
                 try:
                     event = json.loads(line)
                     if "WORKSPACE_RUNNING" in event:
+                        # A recovered backend replaces sharingd's pairing state.
+                        # Record its lifetime so Connect can reject an app still
+                        # holding a connection from before that replacement.
+                        if record_child('sharingd', int(event['WORKSPACE_RUNNING']['state']['pid'])) is None:
+                            raise RuntimeError('sharingd ended before backend readiness')
                         print(json.dumps({"NATIVE_WORKSPACE_READY": True, "controller_pid": controller.pid,
                                           "run": RUN}), flush=True)
                     elif "ORIGINAL_RESTORED" in event:

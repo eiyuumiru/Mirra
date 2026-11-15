@@ -51,8 +51,8 @@ class SupportStatusTests(unittest.TestCase):
                        'injected': True, 'pid': '43'}
         self.patch_launch = patch('readiness.NativeLaunchAgent.state', side_effect=lambda: dict(self.launch))
         self.patch_launch.start(); self.addCleanup(self.patch_launch.stop)
-        self.patch_birth = patch('readiness.process_birth', side_effect=lambda pid:
-                                 tuple(self.broker_birth) if pid == 42 else (43, os.getuid(), 100, 2))
+        self.births = {42: tuple(self.broker_birth), 43: (43, os.getuid(), 100, 2)}
+        self.patch_birth = patch('readiness.process_birth', side_effect=lambda pid: self.births.get(pid))
         self.patch_birth.start(); self.addCleanup(self.patch_birth.stop)
 
     def write_backend(self):
@@ -84,10 +84,81 @@ class SupportStatusTests(unittest.TestCase):
 
     def test_live_health_ready_does_not_claim_mirroring_connection(self):
         self.reply({'ready': True, 'identities': 2, 'sessions': 2})
-        result = observe(self.service)
+        with patch('readiness.NativeAppObserver') as apps:
+            result = observe(self.service)
+            apps.assert_not_called()
         self.assertEqual(result['state'], 'ready')
         self.assertIn('open_mirroring', result['actions'])
         self.assertIsNone(result['mirroring_connection_verified'])
+
+    def recovered_backend(self, identity=None):
+        self.backend['attempt'] = 2; self.write_backend()
+        self.snapshot['backend_attempt'] = 2
+        self.sharingd_birth = [44, os.getuid(), 110, 2]
+        self.births[44] = tuple(self.sharingd_birth)
+        write_state(self.directory / 'backend-children.json',
+                    {'broker': self.broker_birth, 'sharingd': self.sharingd_birth})
+        observer = Mock(last_errors=[], verified={})
+        observer.poll.return_value = [] if identity is None else [identity[0]]
+        if identity is not None:
+            observer.verified[identity[0]] = identity
+        observer.identity.side_effect = lambda pid: observer.verified.get(pid)
+        return observer
+
+    def test_recovery_blocks_an_app_that_predates_the_replacement_sharingd(self):
+        apps = self.recovered_backend((60, 110, 1))
+        self.reply({'ready': True})
+        with patch('readiness.NativeAppObserver', return_value=apps) as factory:
+            result = observe(self.service)
+        self.assertEqual(result['state'], 'waiting_for_mirroring_exit')
+        self.assertIn('Command-Q', result['detail'])
+        self.assertNotIn('open_mirroring', result['actions'])
+        self.assertNotIn(str(self.run), json.dumps(result))
+        factory.assert_called_once_with(
+            Path('/System/Applications/iPhone Mirroring.app/Contents/MacOS/iPhone Mirroring'),
+            self.run / 'sockets.dylib')
+
+    def test_recovery_allows_a_fresh_app_or_no_owned_app(self):
+        for identity in (None, (60, 110, 3)):
+            with self.subTest(identity=identity):
+                apps = self.recovered_backend(identity)
+                self.reply({'ready': True})
+                with patch('readiness.NativeAppObserver', return_value=apps):
+                    self.assertEqual(observe(self.service)['state'], 'ready')
+
+    def test_uncertain_app_observation_does_not_offer_connect_after_recovery(self):
+        apps = self.recovered_backend()
+        apps.last_errors = ['TimeoutExpired']
+        self.reply({'ready': True})
+        with patch('readiness.NativeAppObserver', return_value=apps):
+            self.assertEqual(observe(self.service)['state'], 'unknown')
+
+    def test_recovery_requires_a_live_recorded_sharingd_identity(self):
+        self.recovered_backend()
+        self.reply({'ready': True})
+        with patch('readiness.process_birth', side_effect=lambda pid:
+                   tuple(self.broker_birth) if pid == 42 else (pid, os.getuid(), 200, 1)), \
+                patch('readiness.NativeAppObserver') as apps:
+            self.assertEqual(observe(self.service)['state'], 'unknown')
+            apps.assert_not_called()
+
+    def test_generation_is_rechecked_after_the_app_observation(self):
+        apps = self.recovered_backend((60, 110, 3))
+        def advance():
+            self.backend['attempt'] = 3; self.write_backend()
+            return [60]
+        apps.poll.side_effect = advance
+        self.reply({'ready': True})
+        with patch('readiness.NativeAppObserver', return_value=apps):
+            self.assertEqual(observe(self.service)['state'], 'unknown')
+
+    def test_app_pid_reuse_during_the_recovery_check_does_not_offer_connect(self):
+        apps = self.recovered_backend((60, 110, 3))
+        apps.identity.return_value = (60, 200, 1)
+        apps.identity.side_effect = None
+        self.reply({'ready': True})
+        with patch('readiness.NativeAppObserver', return_value=apps):
+            self.assertEqual(observe(self.service)['state'], 'unknown')
 
     def test_legacy_package_offers_update_without_reprovisioning_or_mutation(self):
         self.service.validate_package.return_value = {'schema_version': 4}

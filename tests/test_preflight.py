@@ -38,3 +38,13 @@ class ConnectionCheckTests(unittest.TestCase):
                 observer.assert_called_once_with(self.service)
         self.service.start.assert_not_called()
         self.service.stop.assert_not_called()
+
+    def test_stale_app_guidance_is_not_replaced_by_a_phone_failure_title(self):
+        report = {'state': 'waiting_for_mirroring_exit', 'title': 'Quit iPhone Mirroring',
+                  'detail': 'Support reconnected. Quit with Command-Q, then connect again.'}
+        result = check(self.service, observer=Mock(return_value=report))
+        self.assertEqual(result['state'], 'blocked')
+        self.assertEqual(result['title'], report['title'])
+        self.assertEqual(result['message'], report['detail'])
+        self.service.start.assert_not_called()
+        self.service.stop.assert_not_called()
