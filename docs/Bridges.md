@@ -21,6 +21,40 @@ alone do not establish compatibility.
 Jailbreaks may impose passcode or Secure Enclave restrictions. Review the
 jailbreak's documentation before testing; for example,
 [palera1n's requirements](https://github.com/palera1n/palera1n#readme).
+Successful symbol lookup, SSH access or key generation does not verify every
+SEP operation needed for authentication. A bridge must also complete signing,
+remote-session creation and confirmation during a live Mirroring connection.
+Mirra cannot repair an unavailable SEP. A11 jailbreak configurations with SEP
+restrictions need separate validation; use a compatible bridge rather than
+changing phone security settings as a Mirra troubleshooting step.
+
+## Current implementation limits
+
+These are source and protocol limits, not a list of tested phone models.
+The iOS 15 minimum does not guarantee that every later iOS release can run
+the helper or provide compatible private APIs.
+
+| Boundary | Current behavior |
+| --- | --- |
+| Endpoint executable | Thin generic arm64 for device iOS, built with a minimum of 15.0. An arm64e physical device is a separate compatibility question; an arm64e endpoint binary is rejected |
+| Required private APIs | All 18 keystore functions must resolve. Additional symbol discovery applies to iOS 15; later releases rely on exports. Resolution does not verify signatures, entitlements or SEP behavior |
+| Key creation | The endpoint and Python broker accept classes 9, 10 and 11. The macOS adapter redirects parameterized creation only for classes 9 and 10; other creation calls retain Apple's native path |
+| Key layout | Only the reviewed ordered DER fields are adapted to platform 3. Unknown layouts are refused; the final wire identity must fit within 65,536 bytes |
+| Per-process state | At most 8 identities and 16 simultaneous native sessions. Identities are process-local; reconnecting SSH does not restore their keybags |
+| Transport | JSON messages are bounded to 262,144 bytes and individual native blobs to 65,536 bytes. Calls are serialized; a timed-out stream needs a new session |
+| Certificate preparation | Certificate size is limited to 1 MiB. Issuance waits up to 40 seconds after the native request returns; the remote setup command has a separate 55-second deadline |
+| Readiness | Setup checks the certificate binding, a fresh class-9 attested key, local validation and wire layout. It does not exercise remote signing, the complete authentication handshake or media |
+
+`make endpoint-protocol` exercises the production endpoint and Python broker
+using synthetic native APIs on the development Mac. It covers malformed native
+results, missing APIs, certificate callbacks, capacity and cleanup. Passing these
+fixtures does not certify any iPhone, iOS build, jailbreak or genuine SEP session.
+Private API changes and jailbreak restrictions still require device testing.
+
+Custom endpoint imports are checked for architecture and platform, but their
+minimum OS is not compared with the connected bridge before deployment. The
+official compiler independently enforces the iOS 15 build target. Avoid supplying
+a custom endpoint built for an OS newer than the bridge.
 
 ## USB and SSH
 
@@ -42,8 +76,8 @@ convention described in [Theos documentation](https://theos.dev/docs/rootless).
 When the standard `/var/jb/usr/bin` bootstrap is present, default deployments
 use `/var/jb/var/mobile/MirraCache/<deployment-id>` for the helper and certificate.
 Each attempt creates a new directory. Existing deployments and custom roots
-are preserved; RootHide converters retain priority and their separate code/data
-layout. No existing cache directory is replaced or redirected.
+are preserved. RootHide's existing path handling is retained separately, but
+RootHide remains unsupported. No existing cache directory is replaced or redirected.
 
 This addresses the executable placement implicated by
 [issue #1](https://github.com/eiyuumiru/Mirra/issues/1). Follow-up iOS 16 bridge
@@ -58,18 +92,15 @@ trust or bypass host-key verification.
 
 ## Dopamine with RootHide
 
-RootHide uses a virtual bootstrap filesystem and separate locations for code
-and data. Mirra verifies its path converters and installs helper code under
-`/usr/local/libexec/Mirra`, with certificate data under
-`/var/mobile/Library/Caches/Mirra`. Each deployment has its own directory.
+**RootHide is currently unsupported by Mirra.** The existing path converters
+and separate code/data layout are implementation work, not verified jailbreak
+compatibility. Creating a helper directory, switching SSH accounts or launching
+the helper does not establish working attestation and Mirroring authentication.
+Use a compatible bridge with an active supported jailbreak.
 
-The code folder may require the phone's root SSH account. If setup reports
-`roothide_code_directory_unavailable`, check the account's permissions and retry
-setup with the appropriate account. Mirra does not elevate privileges automatically.
-
-Saved profiles use `backend.ssh.path_mode: "roothide"`. Executables are launched
-through the bootstrap shell, and certificate paths are converted at each launch.
-The randomized bootstrap root is not saved in the profile.
+Existing profiles may contain `backend.ssh.path_mode: "roothide"`. Mirra retains
+their path handling for investigation and to preserve saved configuration; this
+does not change RootHide's unsupported status.
 
 See RootHide's documentation for
 [code locations and entitlements](https://github.com/roothide/Developer/blob/main/entitlements.md),
@@ -99,4 +130,7 @@ For an additional bridge diagnostic with an app installed in Applications:
 ```
 
 This starts the endpoint and checks a disposable key and certificate binding.
+Errors preserve the native status, failed keystore stage and selected bridge
+capabilities, without including the generated key or identity. A passing result
+does not test the target's authentication or the complete SEP session.
 Keep the setup directory private and share only relevant redacted errors.

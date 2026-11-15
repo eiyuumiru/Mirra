@@ -64,8 +64,19 @@ finishes. Apple's application and launch plist on disk are not edited.
 ## Logs
 
 Open Settings and choose **Show log**. Decoder messages include the route,
-hook-loaded process, stream dimensions/color information, creation status and
-available hardware-property results. An unavailable query remains unknown.
+hook-loaded process, stream dimensions/color information, creation status,
+whether creation returned a session, and available hardware-property results.
+The saved decoder state also summarizes the latest captured creation with its
+process ID. A fresh hook marker clears earlier creation evidence. Hook readiness
+means the hook loaded; successful creation means a session was returned. Neither
+establishes frame delivery or presentation, which remain unknown in the native
+summary. An unavailable query remains unknown.
 
 Dated native logs use the app's seven-day retention policy. Compressed video
 is not recorded. See [App logs](App.md#logs) and [Media](Media.md).
+
+The optional [host observations](Compatibility.md#optional-host-observations)
+decode a 64×64 Baseline H.264 fixture through public VideoToolbox with default
+and hardware-required sessions. This distinguishes session creation from an
+actual decoded frame, but does not exercise Apple's Display P3/FLS path, the
+target's stream, sustained frame rate or native Mirroring rendering.

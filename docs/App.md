@@ -70,7 +70,8 @@ and available iPhone Mirroring/decoder messages. Capture continues while the
 viewer is closed. Passwords and key/certificate contents are redacted.
 
 **Show log** expands the viewer; **Hide log** returns to the compact window.
-**Pause / Resume** control the displayed stream, **Copy** copies visible entries,
+**Pause / Resume** control the displayed stream, **Copy** copies visible entries
+and retains the current host snapshot after it leaves the live log tail,
 and **Verbose** includes routine debug messages. These controls do not stop the
 connection.
 
@@ -82,7 +83,14 @@ Dated files use the local calendar date:
 | `setup-YYYY-MM-DD.log` | Setup, SSH and certificate operations |
 | `control-YYYY-MM-DD.log` | Service commands |
 | `app-YYYY-MM-DD.log` | App actions and status changes |
-| `native-YYYY-MM-DD.log` | Captured macOS Mirroring messages |
+| `native-YYYY-MM-DD.log` | Captured macOS Mirroring messages and host observations |
+
+When app log capture starts, a background task collects one bounded, read-only
+[host snapshot](Compatibility.md#optional-host-observations). It runs separately
+from connection checks and regular log polling. Missing observations stay unknown;
+they do not block Connect. The snapshot is saved in the native log and retained
+for **Copy** during that logging session. It excludes network names, device
+addresses and paired-device inventories.
 
 Mirra keeps seven days of dated logs. Each file rotates at 2 MiB with one backup.
 Older dated files and backups are removed on startup and at date changes while

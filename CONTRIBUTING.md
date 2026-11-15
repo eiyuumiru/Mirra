@@ -8,9 +8,13 @@ third-party notices.
 ## Report a bug
 
 Include the Mirra version, macOS version and build, host model and SIP status,
-Wi-Fi/video drivers, bridge model and jailbreak, target iOS, and connection
-transport. Include the package checksum when available. State whether setup,
+Wi-Fi/Bluetooth/video hardware and driver versions, bridge model, iOS and jailbreak,
+target iOS, and connection transport. Include the package checksum when available. State whether setup,
 discovery, authentication, video or input failed and how to reproduce it.
+For radio failures, state whether Handoff or Universal Clipboard works in each
+direction. Those results narrow discovery problems but do not verify Mirroring.
+The optional [host diagnostic](docs/Compatibility.md#optional-host-observations)
+can supply selected hardware fields without exporting a full device inventory.
 
 Check the [host SIP requirement](docs/Installation.md#system-integrity-protection-sip)
 before testing: fully enabled SIP is currently unsupported. Report the partial

@@ -64,6 +64,8 @@ make build
 
 `make app` builds all required adapters. See [Architecture](Architecture.md)
 for their runtime roles and [Native integration](Native.md) for CLI startup.
+`build/inspector --environment` runs the optional public Metal/VideoToolbox probe;
+its decoder results are separate from the default private-interface report.
 
 ## Phone endpoint
 
@@ -106,7 +108,9 @@ Run the checks appropriate to the change:
 | `make media` | Media hook behavior and incompatible-interface rejection |
 | `make awdl-service` | Public OCLP symbol lookup, repair guards and object lifetime using fixture classes |
 | `make symbols` | Shared keystore loader and image guards using host fixtures |
+| `make endpoint-protocol` | Actual phone request loop and Python broker with synthetic keystore/activation APIs; no phone or SEP is accessed |
 | `make compatibility` | macOS version and architecture acceptance |
+| `make environment` | Public graphics probe, valid H.264 fixture and bounded access-unit parsing; no required hardware result |
 | `make decoder` | Decoder option filtering, stream metadata and argument preservation |
 | `make certificate` | Certificate API handling using isolated fixtures |
 

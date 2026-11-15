@@ -1,5 +1,31 @@
 # Changelog
 
+## Pending changes
+
+- Preserve the failed bridge keystore stage and native status during setup and
+  diagnostics. Reuse attested-key validation and reject malformed successful
+  generation without publishing an identity or ready profile. This improves
+  diagnosis; it does not bypass SEP restrictions.
+- Reject unusable native signatures, session handles and session output while
+  preserving native failures and valid empty output. Validate request field
+  types before dispatch and allow signing when the session limit is reached.
+- Enforce the signing identity size limit after platform adaptation, and add
+  host fixtures for endpoint protocol and wire-format boundaries. These checks
+  do not establish compatibility with additional iOS builds or devices.
+- Add optional read-only host observations through `doctor.py --hardware` for
+  Metal, actual H.264 fixture decoding, Bluetooth controller fields, selected
+  loaded driver versions, Wi-Fi controller/interface bindings, directly matched
+  PCI IDs, AWDL/LLW and SIP. Record the fixture's GPU name when available. Capture
+  one host snapshot per app logging session, save it in dated native logs and
+  retain it for Copy. Keep observations separate from connection readiness and
+  preserve unknown results.
+- Distinguish decoder-hook readiness from actual session creation in saved
+  diagnostics. Preserve the native creation status and process ID without
+  treating session creation as proof of frame delivery or presentation.
+- Correct RootHide compatibility guidance: its path handling remains in the
+  code, but RootHide is currently unsupported. Document driver, bridge and
+  target limits in the [compatibility matrix](docs/Compatibility.md).
+
 ## 0.1.2
 
 - Correct the OCLP RemoteScreen export lookup through `dlsym`, contributed by
@@ -80,7 +106,8 @@ device validation.
 ## 0.1.0
 
 - Guided SSH and USB bridge setup, host-key verification and certificate preparation.
-- Rootless and RootHide deployment support.
+- Rootless deployment and experimental RootHide path handling. RootHide remains
+  unsupported; see [Bridge compatibility](docs/Bridges.md).
 - Background service with connection recovery and verified cleanup.
 - Media transport and decoder compatibility adapters.
 - Compact interface with Settings, appearance options and native error dialogs.

@@ -74,7 +74,8 @@ python3 scripts/provision.py deploy --config private/bridge/access.json --output
 See [Building](Build.md) for endpoint SDK selection. Deployment creates a unique
 directory, uploads and signs the helper, and checks the required capabilities.
 `--remote-root PATH` changes the normal deployment root. RootHide uses separate
-code/data locations described in [Bridge compatibility](Bridges.md#dopamine-with-roothide).
+code/data path handling but remains unsupported; see
+[Bridge compatibility](Bridges.md#dopamine-with-roothide).
 
 The endpoint retrieves its cached MobileActivation certificate. If the cache is
 missing, `--issue-certificate` requests issuance through the device's activation

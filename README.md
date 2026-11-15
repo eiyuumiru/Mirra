@@ -102,10 +102,14 @@ host before setting up native support. See
 | Bridge | Compatible jailbroken iPhone running **iOS 15 or later**, with OpenSSH and `ldid`; see [Bridge compatibility](docs/Bridges.md) |
 | Target iPhone | Meets [Apple's iPhone Mirroring requirements](https://support.apple.com/en-us/120421) |
 | Wi-Fi | Working AWDL support |
+| Bluetooth | Working BLE discovery and return authentication; working Handoff alone does not verify Mirroring |
 | Video | Working H.264 VideoToolbox decoding |
 
 Hackintosh hosts are outside Apple's officially supported configuration.
 Bridge compatibility depends on the device, jailbreak and available system APIs.
+**RootHide is currently unsupported.** See the
+[compatibility matrix](docs/Compatibility.md) for driver families, bridge SEP
+requirements and the limits of the available test evidence.
 Display quality and performance depend on the network and decoder; full-resolution
 rendering is not guaranteed. See [Media](docs/Media.md) and [Decoder](docs/Decoder.md)
 for technical details.
@@ -159,6 +163,7 @@ For a bug report, include your configuration and relevant logs as described in
 | --- | --- |
 | [App](docs/App.md) · [Installation](docs/Installation.md) | Setup, connection, settings and updates |
 | [Bridges](docs/Bridges.md) · [Configuration](docs/Configuration.md) | Device requirements and connection profiles |
+| [Compatibility matrix](docs/Compatibility.md) | OS, graphics, Wi-Fi, Bluetooth, bridge and target limits |
 | [Connection checks](docs/Preflight.md) | Bridge readiness and connection errors |
 | [Decoder](docs/Decoder.md) · [Media](docs/Media.md) | Video and transport compatibility |
 | [Architecture](docs/Architecture.md) · [Service](docs/Service.md) | Components and background support |

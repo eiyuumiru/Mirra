@@ -49,6 +49,9 @@ spaces are supported.
 
 ## RootHide paths
 
+**RootHide is currently unsupported.** The path mode below describes existing
+implementation behavior and saved profiles, not a supported setup procedure.
+
 Guided setup detects RootHide's `jbroot` and `rootfs` tools and saves
 `backend.ssh.path_mode` as `roothide`. Remote paths use the bootstrap's virtual
 namespace. The bootstrap shell resolves executable paths, and certificate paths
@@ -56,7 +59,7 @@ are converted for each invocation.
 
 The default mode is `native`. Unknown modes or unavailable converters cause a
 configuration or launch error. See [Dopamine with RootHide](Bridges.md#dopamine-with-roothide)
-for code locations and account permissions.
+for the current compatibility limit.
 
 ## Decoder route
 
@@ -81,14 +84,23 @@ Omitting `--config` during replacement preserves the installed bridge settings.
 ```sh
 make doctor
 python3 scripts/doctor.py --backend --json
+python3 scripts/doctor.py --hardware --json
 ```
 
 The host report reads configured prerequisites. `--backend` also starts the
 provisioned endpoint, creates and validates a disposable attested key, then
 closes it. USB diagnostics need a running forwarder.
 
-Check the [host SIP requirement](Installation.md#system-integrity-protection-sip)
-separately. These reports do not verify a compatible SIP configuration.
+`--hardware` adds optional read-only observations of Metal devices, actual
+decoding of a small H.264 fixture, selected Bluetooth controller fields, loaded
+driver versions, AWDL interface flags and SIP state. It does not open a bridge
+connection unless `--backend` is also specified. Unavailable tools and failed
+queries remain unknown, and these observations do not change readiness or the
+doctor's exit result. See the [compatibility matrix](Compatibility.md#optional-host-observations)
+for their limits and the installed-app command.
+
+An observed SIP state does not verify native injection permissions. Check the
+[host SIP requirement](Installation.md#system-integrity-protection-sip) separately.
 
 The endpoint greeting includes a certificate digest, which must match the local
 certificate. Legacy greetings without a digest cannot report verified binding.
