@@ -1,6 +1,14 @@
 # Changelog
 
-## Pending changes
+## 0.1.3
+
+- Require a fresh iPhone Mirroring launch after background recovery replaces
+  sharingd. Record and verify the replacement process lifetime, show the
+  Command-Q instruction for an older owned app, and preserve that instruction
+  during Connect preflight.
+- Preserve endpoint transport failures in bridge health and reset replies.
+  Distinguish timeouts, EOF, exited helpers and I/O failures without exposing
+  request contents or replacing the first failure with a later cleanup error.
 
 - Preserve the failed bridge keystore stage and native status during setup and
   diagnostics. Reuse attested-key validation and reject malformed successful
@@ -25,6 +33,16 @@
 - Correct RootHide compatibility guidance: its path handling remains in the
   code, but RootHide is currently unsupported. Document driver, bridge and
   target limits in the [compatibility matrix](docs/Compatibility.md).
+- Distribute the app with a persistent self-signed certificate. The certificate
+  is not an Apple Developer ID, and the app is not notarized; Gatekeeper warnings
+  can still appear. Local builds continue to use ad-hoc signing.
+
+Validation passed 402 Python regressions, 282 native interface checks, 127
+endpoint protocol scenarios and the native symbol, AWDL, graphics, compatibility,
+decoder, keystore, certificate, media and authorization checks. Interface Paste
+validation now uses the fixture's private clipboard. These checks do not establish
+compatibility with additional devices, jailbreaks or macOS builds. See
+[Compatibility](docs/Compatibility.md) for the experimental support limits.
 
 ## 0.1.2
 

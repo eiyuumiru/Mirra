@@ -27,7 +27,12 @@ csrutil status
 
 ## macOS security prompts
 
-The current packaging process uses ad-hoc signing and does not notarize the app.
+The v0.1.3 download is signed with Mirra's self-signed certificate. It is not
+signed with an Apple Developer ID and is not notarized. Self-signing provides a
+consistent signing identity, but does not establish Apple trust or guarantee
+that macOS will retain a previous approval after an update. Local builds use
+ad-hoc signing.
+
 If macOS blocks a trusted copy, **System Settings → Privacy & Security** may offer
 **Open Anyway** after an attempted launch. Follow
 [Apple's security guidance](https://support.apple.com/en-us/102445);

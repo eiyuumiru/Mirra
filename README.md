@@ -10,7 +10,7 @@ A native macOS companion for Apple's iPhone Mirroring on Hackintosh.
 
 [Get started](#get-started) · [Compatibility](#compatibility) · [Screenshots](#screenshots) · [Build](#build-from-source) · [Documentation](#documentation)
 
-**Experimental · v0.1.2 · Intel-based Macs**
+**Experimental · v0.1.3 · Intel-based Macs**
 
 <p>
   <a href="https://ko-fi.com/eiyuumiru"><img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Support Mirra on Ko-fi"></a>

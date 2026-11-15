@@ -3,9 +3,9 @@
 `VERSION` supplies the release version. `config/release.json` supplies internal
 bundle metadata and the repository URL. Package filenames use that version.
 
-The release version is **0.1.2**. Its source version and
-[changelog](../CHANGELOG.md#012) are prepared. Local packages can be built and
-staged for review; tagging and publication are separate steps.
+The release version is **0.1.3**. Its changes are recorded in the
+[changelog](../CHANGELOG.md#013). Local packages can be built and staged for
+review; tagging and publication are separate steps.
 
 ## Prepare
 
@@ -28,7 +28,28 @@ The command creates `Mirra-v<version>.dmg` under `dist/app` and prints its SHA-2
 Stage the selected DMG under `dist/v<version>/` alongside `SHA256SUMS` and
 `RELEASE-NOTES.md`, following the v0.1.0 release layout. Keep internal build
 numbers out of release asset names. The internal bundle number advances once
-per release: v0.1.0 uses 31, v0.1.1 uses 32 and v0.1.2 uses 33.
+per release: v0.1.0 uses 31, v0.1.1 uses 32, v0.1.2 uses 33 and v0.1.3 uses 34.
+
+## Release signing
+
+The v0.1.3 distribution uses a persistent self-signed certificate. It is not an
+Apple Developer ID and the app is not notarized. Signature verification checks
+integrity; it does not establish Apple trust or guarantee that Gatekeeper will
+retain an earlier approval. Keep the certificate's private key and keychain
+password outside the repository and release assets.
+
+`make package` produces an ad-hoc signed local build. For the self-signed
+distribution, run `make app`, sign every bundled macOS binary with the selected
+identity while preserving its identifier, entitlements and flags, then refresh
+the Python and support hash manifests. Preserve the arm64 iOS endpoint: it is
+signed separately on the bridge. Restore the bundled runtime's read-only
+permissions, sign the outer app last, and verify all signatures, manifests and
+deployment targets.
+
+Package that existing signed app with `python3 scripts/package.py`. Running
+`make package` afterward rebuilds the app with ad-hoc signing. Verify signatures
+and the bundled runtime again after copying the app from the mounted DMG and
+ejecting the image.
 
 ## Publish
 

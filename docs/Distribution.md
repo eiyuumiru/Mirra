@@ -31,6 +31,9 @@ is created under `dist/app`. It contains Mirra.app and an Applications shortcut.
 The app includes compiled helpers, a Python runtime and upstream notices, but
 no saved bridge credentials.
 
+The v0.1.3 download uses Mirra's self-signed certificate; local builds use ad-hoc
+signing. Neither is notarized. See [macOS security prompts](Installation.md#macos-security-prompts).
+
 The packager checks the app signature before and after staging and verifies
 that every bundled macOS binary supports the declared macOS 15.0 minimum. It
 verifies the disk image with `hdiutil` and prints the path and SHA-256. To produce an

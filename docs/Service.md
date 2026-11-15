@@ -41,6 +41,12 @@ iPhone Mirroring**: use Command-Q in Apple's app, then wait for Mirra to become
 ready. Startup continues automatically in the same support process. Stop still
 cancels this wait. Closing only the app's window may leave it running.
 
+After background recovery replaces sharingd, Mirra also checks whether an owned
+iPhone Mirroring process predates that replacement. If so, quit Apple's app with
+Command-Q and reconnect after Mirra becomes ready. This closes connections left
+over from the earlier support session. Connect preflight retains the same
+instruction.
+
 Earlier v0.1.2 builds predate this startup recovery change. If they encounter
 this order of startup, support stays paused even after Apple's app quits. Quit
 iPhone Mirroring, open Mirra's Settings, choose **Stop**, wait for shutdown, then
