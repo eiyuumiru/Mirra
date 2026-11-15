@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import subprocess
 import unittest
 import zipfile
 import struct
@@ -11,6 +12,25 @@ import zlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from distribution import ARCHIVE_ROOT, FILE_LIST, export_source, source_payload
+
+
+class RepositorySourceExportTests(unittest.TestCase):
+    def test_export_includes_wire_boundary_regressions(self):
+        data, _ = source_payload(Path(__file__).resolve().parents[1])
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            self.assertIn(ARCHIVE_ROOT + '/tests/test_wire.py', archive.namelist())
+
+    def test_export_can_resolve_the_documented_endpoint_protocol_target(self):
+        repository = Path(__file__).resolve().parents[1]
+        data, _ = source_payload(repository)
+        with tempfile.TemporaryDirectory() as directory:
+            with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                archive.extractall(directory)
+            exported = Path(directory) / ARCHIVE_ROOT
+            self.assertTrue((exported / 'tests/checkendpoint.py').is_file())
+            result = subprocess.run(['make', '-n', 'endpoint-protocol'], cwd=exported,
+                                    capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 class SourceExportTests(unittest.TestCase):

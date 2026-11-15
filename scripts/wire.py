@@ -45,6 +45,8 @@ def platform_ltk(encoded, platform):
     if [tag for tag, *_ in fields] != [0x81, 0x85, 0x86, 0x82, 0x83, 0x84]:
         raise ValueError("Unexpected source LTK layout; do not guess")
     modified = wrap(0x30, raw[parent[2]:parent[3]] + wrap(0x87, bytes([platform])))
+    if len(modified) > 65536:
+        raise ValueError("Platform signing identity exceeds the native key limit")
     updated_parent, = nodes(modified)
     updated = list(nodes(modified, updated_parent[2], updated_parent[3]))
     preserved = all(raw[a[1]:a[3]] == modified[b[1]:b[3]] for a, b in zip(fields, updated))

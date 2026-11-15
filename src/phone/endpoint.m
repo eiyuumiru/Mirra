@@ -93,6 +93,31 @@ static NSMutableDictionary *result(int status) {
     return [@{@"status": @(status), @"status_hex": [NSString stringWithFormat:@"0x%08x", status]} mutableCopy];
 }
 
+static NSMutableDictionary *invalid_native_result(NSString *error, NSString *stage) {
+    // Keep the API's zero status as evidence, but never forward unusable
+    // native output to a caller that interprets status alone as success.
+    NSMutableDictionary *response = result((int)0xe00002bc);
+    response[@"native_status"] = @0;
+    response[@"error"] = error;
+    response[@"operation_stage"] = stage;
+    return response;
+}
+
+static BOOL valid_request_fields(NSDictionary *request) {
+    if (![request[@"operation"] isKindOfClass:NSString.class]) return NO;
+    NSString *string_fields[] = {@"identity", @"remote_ltk", @"parameters", @"data"};
+    for (size_t i = 0; i < sizeof(string_fields) / sizeof(*string_fields); i++) {
+        NSString *field = string_fields[i];
+        if (request[field] && ![request[field] isKindOfClass:NSString.class]) return NO;
+    }
+    NSString *number_fields[] = {@"attested", @"key_class", @"remote_key_class", @"flags", @"session"};
+    for (size_t i = 0; i < sizeof(number_fields) / sizeof(*number_fields); i++) {
+        NSString *field = number_fields[i];
+        if (request[field] && ![request[field] isKindOfClass:NSNumber.class]) return NO;
+    }
+    return YES;
+}
+
 static NSDictionary *reset_owned_session(NSMutableSet<NSNumber *> *sessions,
                                          NSNumber *session, ResetSession reset) {
     if (!session || ![sessions containsObject:session])
@@ -763,6 +788,10 @@ int main(int argc, const char *argv[]) {
                     reply(@{@"error": @"invalid_json"});
                     continue;
                 }
+                if (!valid_request_fields(request)) {
+                    reply(@{@"error": @"invalid_request_fields"});
+                    continue;
+                }
                 NSString *operation = request[@"operation"];
                 if ([operation isEqual:@"exit"]) {
                     reply(@{@"closed": @YES});
@@ -820,7 +849,8 @@ int main(int argc, const char *argv[]) {
                     NSDictionary *identity = identities[request[@"identity"] ?: @""];
                     NSString *encoded = request[@"remote_ltk"];
                     NSData *remote = [encoded isKindOfClass:NSString.class] ? [[NSData alloc] initWithBase64EncodedString:encoded options:0] : nil;
-                    if (!identity || !remote.length || remote.length > 65536 || sessions.count >= 16) {
+                    if (!identity || !remote.length || remote.length > 65536 ||
+                        (![operation isEqual:@"sign_remote"] && sessions.count >= 16)) {
                         reply(@{@"error": @"invalid_identity_key_or_session_limit"});
                         continue;
                     }
@@ -856,8 +886,13 @@ int main(int argc, const char *argv[]) {
                         sign_status = keys.sign_key([identity[@"bag"] intValue], [identity[@"key_class"] intValue],
                                                local.bytes, local.length, remote_class, remote.bytes, remote.length,
                                                &signed_key, &signed_size);
-                        if (sign_status == 0 && signed_key && signed_size)
+                        if (sign_status == 0 && signed_key && signed_size && signed_size <= 65536)
                             remote_owners[[[NSData dataWithBytes:signed_key length:signed_size] base64EncodedStringWithOptions:0]] = identity;
+                    }
+                    if (sign_status == 0 && (!signed_key || !signed_size || signed_size > 65536)) {
+                        clear_blob(signed_key, signed_size);
+                        reply(invalid_native_result(@"invalid_signed_key_result", @"aks_sign_signing_key"));
+                        continue;
                     }
                     if ([operation isEqual:@"sign_remote"]) {
                         NSMutableDictionary *response = result(sign_status);
@@ -882,6 +917,8 @@ int main(int argc, const char *argv[]) {
                     if (status == 0 && session >= 0) {
                         [sessions addObject:@(session)];
                         response[@"session"] = @(session);
+                    } else if (status == 0) {
+                        [response addEntriesFromDictionary:invalid_native_result(@"invalid_session_handle", @"aks_remote_session")];
                     }
                     reply(response);
                     continue;
@@ -915,7 +952,14 @@ int main(int argc, const char *argv[]) {
                     else
                         status = keys.remote_step(session.intValue, input.bytes, input.length, &output, &size);
                     NSMutableDictionary *response = result(status);
-                    if (output && size && size <= 65536) {
+                    // Empty output is permitted by step/setup/confirmation.
+                    // A nonzero length still requires a bounded native buffer.
+                    if (status == 0 && ((size && !output) || size > 65536)) {
+                        NSString *stage = [operation isEqual:@"token"] ? @"aks_remote_session_token" :
+                            [operation isEqual:@"confirm"] ? @"aks_remote_peer_confirm" :
+                            [operation isEqual:@"setup"] ? @"aks_remote_peer_setup" : @"aks_remote_session_step";
+                        response = invalid_native_result(@"invalid_session_output", stage);
+                    } else if (status == 0 && output && size) {
                         NSData *data = [NSData dataWithBytes:output length:size];
                         response[@"data"] = [data base64EncodedStringWithOptions:0];
                     }

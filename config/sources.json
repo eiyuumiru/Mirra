@@ -137,11 +137,13 @@
     "tests/authorization.m",
     "tests/awdl-service.m",
     "tests/certificate.m",
+    "tests/checkendpoint.py",
     "tests/checkkeystore.py",
     "tests/checkmedia.py",
     "tests/compatibility.m",
     "tests/decoder.m",
     "tests/endpoint-check.m",
+    "tests/endpoint-protocol.m",
     "tests/endpoint.m",
     "tests/interface.m",
     "tests/keystore.m",
@@ -181,6 +183,7 @@
     "tests/test_runtime.py",
     "tests/test_sharingd.py",
     "tests/test_startup.py",
-    "tests/test_supervisor.py"
+    "tests/test_supervisor.py",
+    "tests/test_wire.py"
   ]
 }

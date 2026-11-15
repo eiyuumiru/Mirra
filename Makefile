@@ -76,6 +76,13 @@ $(BUILD)/keyprobe: tests/keystore.m src/mirroring/keystore.m $(BUILD)/.host-targ
 $(BUILD)/endpointprobe: tests/endpoint.m src/phone/endpoint.m src/phone/keystore-symbols.h src/phone/cache-symbols.h $(BUILD)/.host-target | $(BUILD)/.dir
 	xcrun clang $(HOST_FLAGS) -fobjc-arc -fblocks -Wall -Wextra -Werror -framework Foundation -framework Security "$<" -o "$@"
 
+$(BUILD)/endpoint-protocol: tests/endpoint-protocol.m src/phone/endpoint.m src/phone/keystore-symbols.h src/phone/cache-symbols.h $(BUILD)/.host-target | $(BUILD)/.dir
+	xcrun clang $(HOST_FLAGS) -fobjc-arc -fblocks -Wall -Wextra -Werror -framework Foundation -framework Security "$<" -o "$@"
+
+.PHONY: endpoint-protocol
+endpoint-protocol: $(BUILD)/endpoint-protocol
+	python3 tests/checkendpoint.py
+
 endpoint: | $(BUILD)/.dir
 	python3 scripts/endpoint.py
 
