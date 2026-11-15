@@ -122,9 +122,10 @@ static OSStatus routedCreate(CFAllocatorRef allocator, CMVideoFormatDescriptionR
     CMVideoDimensions size = CMVideoFormatDescriptionGetDimensions(format);
     char message[512];
     snprintf(message, sizeof message,
-        "MIRRA_DECODER_ROUTE create=%u removed=%d had_fls=%d colour_primaries=%d width=%d height=%d status=%d hardware_query=%d using_hardware=%d secondary_bitfield=%d secondary_flb=%d",
-        index, adapted != nil, fls, colourPrimaries, size.width, size.height, (int)status,
-        (int)query, usingHardware, original[@"NegotiationDetailsBitField"] != nil, original[@"NegotiatedFLB"] != nil);
+        "MIRRA_DECODER_ROUTE pid=%d create=%u removed=%d had_fls=%d colour_primaries=%d width=%d height=%d status=%d session_created=%d hardware_query=%d using_hardware=%d secondary_bitfield=%d secondary_flb=%d",
+        getpid(), index, adapted != nil, fls, colourPrimaries, size.width, size.height, (int)status,
+        !status && session && *session, (int)query, usingHardware,
+        original[@"NegotiationDetailsBitField"] != nil, original[@"NegotiatedFLB"] != nil);
     record(message);
     return status;
 }

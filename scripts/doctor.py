@@ -11,6 +11,7 @@ import sys
 from configuration import ConfigError,load_config,ROOT
 from usbmux import list_devices,product_type,select_device
 from compatibility import inspect_media_profile, supported_apple_app
+from hardware import inspect_host_environment
 from keystore import bridge_capabilities, verify_attested_key
 from transport import EndpointError
 
@@ -85,6 +86,7 @@ def main():
     parser.add_argument('--devices',action='store_true',help='List USB devices without changing them')
     parser.add_argument('--show-identifiers',action='store_true',help='Include USB serials for local configuration; omit from public reports')
     parser.add_argument('--backend',action='store_true',help='Open configured SSH endpoint and create/validate one disposable signing key')
+    parser.add_argument('--hardware',action='store_true',help='Read optional graphics, Wi-Fi/controller bindings, Bluetooth, loaded drivers, AWDL/llw and SIP observations; does not change readiness')
     args = parser.parse_args()
     try:
         config = load_config(args.config)
@@ -117,11 +119,18 @@ def main():
         checks.append(inspect_backend(config))
     report = {'checks':checks,'native_mirroring_verified':False,'daily_use_verified':False,
               'backend_transport':config.transport,'backend_runtime_tested':args.backend}
+    if args.hardware:
+        report['host_environment'] = inspect_host_environment()
     if args.json:
         print(json.dumps(report,indent=2))
     else:
         for check in checks:
             print(f'{check["status"].upper():7} {check["check"]}: {check["detail"]}')
+        if args.hardware:
+            for name in ('host', 'graphics', 'wifi', 'network_controllers', 'pci_inventory', 'bluetooth', 'loaded_drivers', 'awdl', 'llw', 'sip'):
+                observation = report['host_environment'][name]
+                print(f'{observation["status"].upper():8} {name}: '
+                      + json.dumps(observation, separators=(',', ':')))
         print('These checks do not verify a complete Mirroring session or daily-use stability.')
     return 0 if all(c['status']=='pass' for c in checks) else 1
 

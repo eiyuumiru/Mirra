@@ -27,6 +27,7 @@ static const CGFloat MirraLogExpandedHeight = 158;
 @property NSButton *directoryButton;
 @property NSMutableArray<NSString *> *lines;
 @property NSMutableArray<NSNumber *> *nativeLines;
+@property NSMutableArray<NSString *> *hostLines;
 @property NSUInteger characters;
 @property NSUInteger nativeCount;
 @property NSUInteger nativeCharacters;
@@ -53,7 +54,8 @@ static const CGFloat MirraLogExpandedHeight = 158;
 }
 - (instancetype)init {
     self = [super init]; if (!self) return nil;
-    self.expanded = NO; self.lines = [NSMutableArray array]; self.nativeLines = [NSMutableArray array]; self.cursor = @{};
+    self.expanded = NO; self.lines = [NSMutableArray array]; self.nativeLines = [NSMutableArray array];
+    self.hostLines = [NSMutableArray array]; self.cursor = @{};
     self.clock = [[NSDateFormatter alloc] init]; self.clock.dateFormat = @"HH:mm:ss";
     self.timestamp = [[NSISO8601DateFormatter alloc] init];
     self.timestamp.formatOptions = NSISO8601DateFormatWithInternetDateTime | NSISO8601DateFormatWithFractionalSeconds;
@@ -124,6 +126,7 @@ static const CGFloat MirraLogExpandedHeight = 158;
     if (![source isKindOfClass:NSString.class] || source.length > 24) source = @"Mirra";
     NSString *when = historical ? @"Earlier" : [self.clock stringFromDate:time ?: NSDate.date];
     NSString *line = [NSString stringWithFormat:@"%@ [%@] [%@] %@", when, label ?: @"Info", source, message];
+    if ([source isEqual:@"Host hardware"] && self.hostLines.count < 160) [self.hostLines addObject:line];
     BOOL native = [source isEqual:@"Apple Mirroring"] || [source isEqual:@"AVConference"] || [source isEqual:@"VideoToolbox"] || [source isEqual:@"Decoder"];
     [self.lines addObject:line]; [self.nativeLines addObject:@(native)]; self.characters += line.length;
     if (native) { self.nativeCount++; self.nativeCharacters += line.length; }
@@ -199,18 +202,19 @@ static const CGFloat MirraLogExpandedHeight = 158;
     }
     [self render];
 }
-- (void)refresh {
-    if (self.stopped || self.reading) return;
-    self.reading = YES; NSUInteger generation = self.generation;
+- (void)readSnapshot:(BOOL)hardware {
+    if (self.stopped || (!hardware && self.reading)) return;
+    if (!hardware) self.reading = YES;
+    NSUInteger generation = self.generation;
     NSDictionary *cursor = self.cursor;
     NSString *pythonPath = [NSBundle.mainBundle objectForInfoDictionaryKey:@"SupportPython"];
     NSURL *resources = NSBundle.mainBundle.resourceURL;
-    if (!pythonPath || !resources) { self.reading = NO; [self applySnapshot:nil]; return; }
+    if (!pythonPath || !resources) { if (!hardware) self.reading = NO; [self applySnapshot:nil]; return; }
     NSURL *python = [resources URLByAppendingPathComponent:pythonPath];
     NSURL *script = [resources URLByAppendingPathComponent:@"Support/scripts/diagnostics.py"];
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0), ^{
         NSTask *task = [[NSTask alloc] init]; task.executableURL = python;
-        task.arguments = @[@"-E",@"-s",@"-B",script.path];
+        task.arguments = hardware ? @[@"-E",@"-s",@"-B",script.path,@"--hardware"] : @[@"-E",@"-s",@"-B",script.path];
         NSPipe *output = NSPipe.pipe; NSPipe *input = NSPipe.pipe;
         task.standardOutput = output; task.standardInput = input; task.standardError = NSFileHandle.fileHandleWithNullDevice;
         NSData *data = nil;
@@ -223,11 +227,13 @@ static const CGFloat MirraLogExpandedHeight = 158;
         }
         NSDictionary *snapshot = data.length <= 1048576 ? [NSJSONSerialization JSONObjectWithData:data ?: NSData.data options:0 error:NULL] : nil;
         dispatch_async(dispatch_get_main_queue(), ^{
-            self.reading = NO; if (self.stopped || self.generation != generation) return;
+            if (!hardware) self.reading = NO;
+            if (self.stopped || self.generation != generation) return;
             [self applySnapshot:snapshot];
         });
     });
 }
+- (void)refresh { [self readSnapshot:NO]; }
 - (void)tick:(NSTimer *)timer { (void)timer; if (self.view.window.visible) [self refresh]; }
 - (void)startNativeStream {
     if (self.stopped || self.nativeTask) return;
@@ -276,9 +282,11 @@ static const CGFloat MirraLogExpandedHeight = 158;
 - (void)start {
     if (self.timer) return; self.stopped = NO; self.generation++;
     self.capturing = YES;
+    [self.hostLines removeAllObjects];
     [self persistEvent:@{@"message":@"Mirra log capture started",@"source":@"Mirra",@"level":@"info"}];
     self.timer = [NSTimer scheduledTimerWithTimeInterval:2 target:self selector:@selector(tick:) userInfo:nil repeats:YES];
     self.timer.tolerance = .4; [self refresh];
+    [self readSnapshot:YES];
     [self startNativeStream];
 }
 - (void)stop {
@@ -331,8 +339,14 @@ static const CGFloat MirraLogExpandedHeight = 158;
 }
 - (void)copyToPasteboard:(NSPasteboard *)pasteboard {
     if (!self.textView.string.length) return;
+    NSMutableArray<NSString *> *extra = [NSMutableArray array];
+    for (NSString *line in self.hostLines) {
+        if (![self.lines containsObject:line]) [extra addObject:line];
+    }
+    NSString *value = self.textView.string;
+    if (extra.count) value = [value stringByAppendingFormat:@"\n%@", [extra componentsJoinedByString:@"\n"]];
     [pasteboard clearContents];
-    [pasteboard setString:self.textView.string forType:NSPasteboardTypeString];
+    [pasteboard setString:value forType:NSPasteboardTypeString];
 }
 - (NSURL *)logDirectoryURL { return [NSURL fileURLWithPath:[NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support/Mirra/logs"] isDirectory:YES]; }
 - (BOOL)revealDirectory:(NSURL *)directory { return [NSWorkspace.sharedWorkspace openURL:directory]; }

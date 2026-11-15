@@ -22,6 +22,26 @@ DESKTOP = dict(LAPTOP, model='MacPro7,1')
 
 
 class ProfileTests(unittest.TestCase):
+    def test_video_observations_require_session_evidence_and_preserve_unknown_frames(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            instance = decoder.DecoderRoute(temporary, temporary, host=LAPTOP)
+            self.assertIsNone(instance.video_observations()['session_created'])
+            instance.events.append({'message': 'MIRRA_DECODER_ROUTE ', 'status': 0, 'using_hardware': 1})
+            self.assertIsNone(instance.video_observations()['session_created'])
+            instance.events.append({'message': 'MIRRA_DECODER_ROUTE ', 'status': 0,
+                                    'session_created': 1, 'hardware_query': 0, 'using_hardware': 1})
+            value = instance.video_observations()
+            self.assertTrue(value['session_created'])
+            self.assertTrue(value['using_hardware_acceleration'])
+            self.assertIsNone(value['frame_delivery_verified'])
+            self.assertIsNone(value['presentation_verified'])
+            instance.events.append({'message': 'MIRRA_DECODER_ROUTE ', 'status': 0, 'session_created': 0})
+            self.assertFalse(instance.video_observations()['session_created'])
+            instance.events.append({'message': 'MIRRA_DECODER_ROUTE ', 'status': -123, 'session_created': 1})
+            self.assertFalse(instance.video_observations()['session_created'])
+            instance.events.append({'message': 'MIRRA_DECODER_HOOK_READY '})
+            self.assertIsNone(instance.video_observations()['session_created'])
+
     def test_supported_laptop_checks_actual_stream(self):
         value = decoder.select_route('auto', LAPTOP)
         self.assertTrue(value['enabled'])

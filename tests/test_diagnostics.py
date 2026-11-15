@@ -5,9 +5,10 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from diagnostics import collect, PrivateReader, project_line, MAX_ENTRIES
+from diagnostics import collect, hardware_snapshot, PrivateReader, project_line, MAX_ENTRIES, MAX_MESSAGE
 from logstream import project, predicate, NOISY_FRAMEWORKS
 from activity import FileLog
 
@@ -36,6 +37,62 @@ class DiagnosticTests(unittest.TestCase):
 
     def write(self, name, value):
         return self.file(name, json.dumps(value).encode())
+
+    def test_hardware_snapshot_is_explicit_persisted_and_does_not_reset_log_cursor(self):
+        report = {'schema_version': 1, 'wifi': {'status': 'unknown', 'reason': 'timeout'},
+                  'native_mirroring_verified': None}
+        with patch('hardware.inspect_host_environment', return_value=report) as inspect:
+            collect(self.root)
+            inspect.assert_not_called()
+            snapshot = hardware_snapshot(self.root)
+            inspect.assert_called_once_with()
+        self.assertNotIn('cursor', snapshot)
+        self.assertTrue(snapshot['ok'])
+        messages = [json.loads(item['message']) for item in snapshot['entries']]
+        self.assertIn({'wifi': report['wifi']}, messages)
+        files = list((self.root/'logs').glob('native-*.log'))
+        self.assertEqual(len(files), 1)
+        self.assertEqual(files[0].stat().st_mode & 0o777, 0o600)
+        saved = [json.loads(line) for line in files[0].read_text().splitlines()]
+        self.assertEqual([row['message'] for row in saved], [row['message'] for row in snapshot['entries']])
+
+    def test_large_hardware_lists_remain_complete_json_without_truncation(self):
+        drivers = [{'bundle_identifier': 'example.' + 'x'*100 + str(i), 'loaded_version': '1.2'} for i in range(128)]
+        names = ['GPU ' + '\U0001f600'*200 for _ in range(16)]
+        with patch('hardware.inspect_host_environment', return_value={'loaded_drivers': {'entries': drivers}, 'gpu_names': names}):
+            snapshot = hardware_snapshot(self.root)
+        recovered = []
+        recovered_names = []
+        for item in snapshot['entries']:
+            self.assertLessEqual(len(item['message']), MAX_MESSAGE)
+            self.assertLessEqual(len(item['message'].encode('utf-16-le')) // 2, MAX_MESSAGE)
+            decoded = json.loads(item['message'])
+            for key, value in decoded.items():
+                if isinstance(value, list):
+                    (recovered_names if key.startswith('gpu_names') else recovered).extend(value)
+        self.assertEqual(recovered, drivers)
+        self.assertEqual(recovered_names, names)
+        self.assertLess(len(snapshot['entries']), 160)
+
+    def test_hardware_storage_failure_preserves_snapshot_without_exposing_error_paths(self):
+        (self.root/'logs').symlink_to(self.root)
+        with patch('hardware.inspect_host_environment', return_value={'wifi': {'status': 'unknown'}}):
+            snapshot = hardware_snapshot(self.root)
+        self.assertTrue(snapshot['ok'])
+        self.assertTrue(any(item['level'] == 'warning' for item in snapshot['entries']))
+        self.assertNotIn(str(self.root), json.dumps(snapshot))
+
+    def test_decoder_state_distinguishes_ready_hook_from_unknown_frame_delivery(self):
+        video = {'session_created': True, 'creation_status': 0,
+                 'frame_delivery_verified': None, 'presentation_verified': None}
+        self.write('current/runtime/native-20261108-110000/decoder-route.json', {
+            'mode': 'no_fls', 'ready': True, 'native_video_observations': video,
+            'stage': 'private-path', 'native_decoder_events': ['private-event']})
+        snapshot = collect(self.root)
+        row = next(row for row in snapshot['entries'] if row['source'] == 'Decoder')
+        self.assertEqual(json.loads(row['message'])['native_video_observations'], video)
+        self.assertNotIn('private', row['message'])
+        self.assertFalse(any(row['source'] == 'Decoder' for row in collect(self.root, snapshot['cursor'])['entries']))
 
     def test_live_setup_output_is_read_without_repeating_unchanged_lines(self):
         path = self.file('logs/setup.log', b'{"source":"SSH stderr","message":"debug1: Authentication succeeded (publickey).","timestamp":"2026-11-08T04:00:00.000000+00:00","level":"debug"}\n')

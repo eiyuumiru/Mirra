@@ -81,11 +81,38 @@ class DecoderRoute:
     def save(self, **extra):
         value = dict(self.decision, ready=self.ready, hook_pid=self.pid,
                      native_event_count=self.event_count, native_decoder_events=list(self.events),
+                     native_video_observations=self.video_observations(),
                      **self.metadata, **extra)
         if self.stage is not None:
             value['stage'] = str(self.stage)
         write_state(self.directory / 'decoder-route.json', value)
         return value
+
+    def video_observations(self):
+        """Creation is not frame delivery; a fresh hook discards old evidence."""
+        result = {'scope': 'latest_captured_creation', 'process_id': None,
+                  'session_created': None, 'creation_status': None,
+                  'using_hardware_acceleration': None,
+                  'frame_delivery_verified': None, 'presentation_verified': None}
+        for event in reversed(self.events):
+            message = event.get('message', '')
+            if message.startswith('MIRRA_DECODER_HOOK_READY '):
+                break
+            if not message.startswith('MIRRA_DECODER_ROUTE '):
+                continue
+            status = event.get('status')
+            result['process_id'] = event.get('pid')
+            result['creation_status'] = status
+            created = event.get('session_created')
+            if type(status) is int and status != 0:
+                result['session_created'] = False
+            elif status == 0 and created in (0, 1):
+                result['session_created'] = bool(created)
+            if (result['session_created'] is True and event.get('hardware_query') == 0
+                    and event.get('using_hardware') in (0, 1)):
+                result['using_hardware_acceleration'] = bool(event['using_hardware'])
+            break
+        return result
 
     def interrupted(self):
         return self.stop is not None and self.stop.is_set()

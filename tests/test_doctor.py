@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from configuration import load_config
-from doctor import inspect_backend
+from doctor import inspect_backend, main
 from test_provisioning import fixture_ltk
 
 
@@ -56,6 +56,20 @@ class BridgeDiagnosticTests(unittest.TestCase):
             self.assertEqual(details['capabilities']['os_version'], '15.8.8')
             self.assertNotIn('private', json.dumps(report))
 
+    def test_optional_unknown_hardware_does_not_change_doctor_result(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            profile = Path(temporary) / 'config.json'
+            profile.write_text('{"backend":{"transport":"ssh"}}')
+            checks = [{'check': 'fixture', 'status': 'pass', 'detail': 'Existing check'}]
+            with patch('doctor.inspect_host', return_value=checks), \
+                    patch('doctor.inspect_host_environment', return_value={'graphics': {'status': 'unknown'}}) as probe, \
+                    patch('builtins.print'), \
+                    patch('sys.argv', ['doctor.py', '--config', str(profile), '--json']):
+                self.assertEqual(main(), 0)
+                probe.assert_not_called()
+                with patch('sys.argv', ['doctor.py', '--config', str(profile), '--json', '--hardware']):
+                    self.assertEqual(main(), 0)
+                    probe.assert_called_once()
 
 
 if __name__ == '__main__':

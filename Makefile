@@ -55,8 +55,8 @@ $(BUILD)/media.dylib: src/mirroring/media.m src/mirroring/awdl-service.m src/mir
 	xcrun clang $(HOST_FLAGS) -dynamiclib -fobjc-arc -fblocks -Wall -Wextra -Werror -framework Foundation -framework Network $(filter %.m,$^) -o "$@"
 	codesign --force --sign - "$@"
 
-$(BUILD)/inspector: src/tools/inspect.m src/mirroring/compatibility.m src/mirroring/profile.h $(BUILD)/.host-target | $(BUILD)/.dir
-	xcrun clang $(HOST_FLAGS) -fobjc-arc -fblocks -Wall -Wextra -Werror -framework Foundation -framework Network $(filter %.m,$^) -o "$@"
+$(BUILD)/inspector: src/tools/inspect.m src/tools/environment.m src/tools/environment.h src/mirroring/compatibility.m src/mirroring/profile.h $(BUILD)/.host-target | $(BUILD)/.dir
+	xcrun clang $(HOST_FLAGS) -fobjc-arc -fblocks -Wall -Wextra -Werror -framework Foundation -framework Network -framework Metal -framework VideoToolbox -framework CoreMedia -framework CoreVideo $(filter %.m,$^) -o "$@"
 	codesign --force --sign - "$@"
 
 $(BUILD)/mediaprobe: tests/media.m $(BUILD)/.host-target | $(BUILD)/.dir
@@ -165,3 +165,10 @@ $(BUILD)/compatibilityprobe: tests/compatibility.m src/mirroring/compatibility.m
 .PHONY: compatibility
 compatibility: $(BUILD)/compatibilityprobe
 	$(BUILD)/compatibilityprobe
+
+$(BUILD)/environmentprobe: tests/environment.m src/tools/environment.m src/tools/environment.h $(BUILD)/.host-target | $(BUILD)/.dir
+	xcrun clang $(HOST_FLAGS) -fobjc-arc -fblocks -Wall -Wextra -Werror -framework Foundation -framework Metal -framework VideoToolbox -framework CoreMedia -framework CoreVideo "$<" -o "$@"
+
+.PHONY: environment
+environment: $(BUILD)/environmentprobe
+	$(BUILD)/environmentprobe

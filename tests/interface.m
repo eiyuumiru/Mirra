@@ -316,8 +316,15 @@ int main(void) {
         NSDictionary *same = @{@"state":@"ready",@"detail":@"Exact returned readiness output"};
         [logs recordReport:same]; NSUInteger once = logs.textView.string.length; [logs recordReport:same];
         require(once > stableLength && logs.textView.string.length == once, @"Unchanged status polling filled the log with duplicates");
+        [logs applySnapshot:@{@"ok":@YES,@"cursor":@{@"files":@{@"test":@1}},@"entries":@[]}];
+        [logs applySnapshot:@{@"ok":@YES,@"entries":@[@{@"source":@"Host hardware",@"message":@"fixture hardware snapshot"}]}];
+        require([[logs valueForKey:@"cursor"] isEqual:@{@"files":@{@"test":@1}}], @"Hardware capture reset the log follower cursor");
         for (NSUInteger i=0;i<600;i++) [logs recordMessage:[NSString stringWithFormat:@"real event %lu",(unsigned long)i] source:@"Bridge" level:@"debug"];
         require(![logs.textView.string containsString:@"real event 0\n"] && [logs.textView.string containsString:@"real event 599"], @"Live history did not retain a bounded recent tail");
+        NSPasteboard *hardwareCopy = [NSPasteboard pasteboardWithUniqueName]; [logs copyToPasteboard:hardwareCopy];
+        require([[hardwareCopy stringForType:NSPasteboardTypeString] containsString:@"fixture hardware snapshot"],
+                @"Copy lost the hardware snapshot after ordinary log retention");
+        [hardwareCopy releaseGlobally];
         require(![[MirraLogs alloc] init].expanded, @"A new launch did not restore compact logging");
         LogFolderProbe *folder = [[LogFolderProbe alloc] init];
         NSURL *temporary = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString] isDirectory:YES];

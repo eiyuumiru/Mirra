@@ -24,6 +24,48 @@ MAX_ENTRIES = 160
 MAX_MESSAGE = 4000
 
 
+def hardware_snapshot(base=None):
+    """One explicit snapshot, independent of the inexpensive log polling path."""
+    from hardware import inspect_host_environment
+    from activity import FileLog
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        report = inspect_host_environment()
+    except (OSError, ValueError, RuntimeError):
+        report = {'status': 'unknown', 'reason': 'inspection_failed'}
+    entries = []
+    # Split long lists into complete JSON messages instead of truncating data.
+    def add(name, value):
+        # ASCII escapes keep Python and the native viewer's UTF-16 length
+        # limits identical, including hardware names containing emoji.
+        message = json.dumps({name: value}, ensure_ascii=True, separators=(',', ':'))
+        if len(message) <= MAX_MESSAGE:
+            entries.append(entry('Host hardware', message, observed_at=now))
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                add(name + '.' + key, item)
+        elif isinstance(value, list):
+            if len(value) > 1:
+                middle = len(value) // 2
+                add(name + '[:' + str(middle) + ']', value[:middle])
+                add(name + '[' + str(middle) + ':]', value[middle:])
+            elif value:
+                add(name + '[0]', value[0])
+        else:
+            entries.append(entry('Host hardware', json.dumps({name: {
+                'status': 'unknown', 'reason': 'field_limit'}}), observed_at=now))
+    for name, value in report.items():
+        add(name, value)
+    storage = FileLog(Path(base or Path.home() / 'Library/Application Support/Mirra') / 'logs', name='native.log')
+    try:
+        for item in entries:
+            storage(dict(item, timestamp=now))
+    except (OSError, ValueError):
+        entries.append(entry('Logs', 'Hardware observations could not be saved to the log folder.', 'warning', now))
+    # Deliberately no cursor: this must not reset the concurrent log follower.
+    return {'ok': True, 'entries': entries, 'observed_at': now}
+
+
 def entry(source, message, level='info', observed_at=None):
     return {'source': source, 'level': level, 'message': message[:MAX_MESSAGE],
             'observed_at': observed_at}
@@ -236,6 +278,9 @@ def collect(base=None, cursor=None):
             backend = state(runtime + '/backend-status.json')
             selected = {k: backend[k] for k in ('phase','attempt','ready','automatic_recovery','reason','exit_code','retry_seconds') if k in backend}
             changed('backend:' + run, selected, 'Bridge state')
+            decoder = state(runtime + '/decoder-route.json')
+            selected = {k: decoder[k] for k in ('mode', 'enabled', 'ready', 'native_video_observations') if k in decoder}
+            changed('decoder:' + run, selected, 'Decoder')
             files.append((runtime + '/app.log', 'Mirroring'))
             attempt = backend.get('directory')
             if isinstance(attempt, str) and re.fullmatch(r'backend-\d{6}', attempt):
@@ -288,7 +333,11 @@ def collect(base=None, cursor=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--base', type=Path)
+    parser.add_argument('--hardware', action='store_true', help='Capture and save one read-only host snapshot; never contacts a phone')
     args = parser.parse_args()
+    if args.hardware:
+        print(json.dumps(hardware_snapshot(args.base), ensure_ascii=False))
+        return 0
     data = sys.stdin.buffer.read(STATE_BYTES + 1)
     try:
         if len(data) > STATE_BYTES:
