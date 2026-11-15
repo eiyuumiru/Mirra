@@ -60,6 +60,13 @@
 }
 - (void)paste:(id)sender { (void)sender; [self readSelectionFromPasteboard:self.clipboard]; }
 - (void)cut:(id)sender { [self copy:sender]; [self delete:sender]; }
+- (BOOL)validateMenuItem:(NSMenuItem *)item {
+    // AppKit normally validates Paste against the system clipboard. Use the
+    // same private board as paste: without reading or changing the user's data.
+    if (item.action == @selector(paste:))
+        return self.editable && [self.clipboard availableTypeFromArray:self.readablePasteboardTypes] != nil;
+    return [super validateMenuItem:item];
+}
 @end
 
 static int checks = 0;
