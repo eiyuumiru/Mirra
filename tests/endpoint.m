@@ -25,6 +25,110 @@ static void *fake_fallback(const char *name) {
     return strcmp(name, "aks_remote_session") == 0 ? (void *)fake_fallback : NULL;
 }
 
+static int key_failure, key_invalid, key_calls[8], key_unloads;
+static int key_stage(int stage) {
+    key_calls[stage]++;
+    return key_failure == stage ? -700 - stage : 0;
+}
+
+static int fake_bag(const void *password, int length, int flags, int *bag) {
+    if (!password || length != 32 || flags != 0) abort();
+    int status = key_stage(1);
+    *bag = status || key_invalid == 1 ? -1 : 17;
+    return status;
+}
+
+static int fake_unload(int bag) {
+    if (bag != 17) abort();
+    key_unloads++;
+    return 0;
+}
+
+static void *fake_params(const void *data, size_t length) {
+    if (data || length) abort();
+    return key_stage(2) ? NULL : (void *)1;
+}
+
+static int fake_data(void *params, int tag, const void *data, size_t length) {
+    if (params != (void *)1 || tag != 21 || length != 4 || memcmp(data, "DCRT", 4)) abort();
+    return key_stage(3);
+}
+
+static int fake_number(void *params, int tag, const int64_t *value) {
+    if (params != (void *)1 || tag != 20 || *value != 4) abort();
+    return key_stage(4);
+}
+
+static const unsigned char fixture_der[] = {0x30, 0x00};
+static int fake_der(void *params, const void **der, size_t *length) {
+    if (params != (void *)1) abort();
+    *der = key_invalid == 5 ? NULL : fixture_der;
+    *length = key_invalid == 5 ? 0 : sizeof(fixture_der);
+    return key_stage(5);
+}
+
+static int fake_key(int bag, int key_class, void **blob, size_t *size) {
+    if (bag != 17 || key_class != 9) abort();
+    int status = key_stage(7);
+    if (!status && key_invalid != 6) {
+        *size = 8;
+        *blob = malloc(*size);
+        memcpy(*blob, "TESTKEY!", *size);
+    }
+    return status;
+}
+
+static int fake_attested_key(int bag, int key_class, const void *der, size_t length,
+                             void **blob, size_t *size) {
+    if (der != fixture_der || length != sizeof(fixture_der)) abort();
+    int status = key_stage(6);
+    return status ? status : fake_key(bag, key_class, blob, size);
+}
+
+static BOOL check_generation(void) {
+    KeyStore keys = {.create_bag = fake_bag, .unload_bag = fake_unload,
+        .params_create = fake_params, .params_data = fake_data, .params_number = fake_number,
+        .params_der = fake_der, .create_key_params = fake_attested_key, .create_key = fake_key};
+    NSData *certificate = [NSData dataWithBytes:"DCRT" length:4];
+    NSArray *stages = @[@"", @"aks_create_bag", @"aks_params_create", @"aks_params_set_data",
+                       @"aks_params_set_number", @"aks_params_get_der", @"aks_create_signing_key_with_params"];
+    for (int stage = 1; stage <= 6; stage++) {
+        key_failure = stage; key_invalid = 0; key_unloads = 0;
+        memset(key_calls, 0, sizeof(key_calls));
+        NSMutableDictionary *owned = [NSMutableDictionary dictionary];
+        NSDictionary *response = generate_identity(&keys, certificate, YES, 9, owned);
+        if (owned.count || response[@"identity"] || key_unloads != (stage == 1 ? 0 : 1) ||
+            ![response[@"operation_stage"] isEqual:stages[stage]]) return NO;
+        if (stage == 2) {
+            if (![response[@"error"] isEqual:@"keystore_parameters_unavailable"] || key_calls[3]) return NO;
+        } else if ([response[@"status"] intValue] != -700 - stage) return NO;
+        for (int skipped = stage + 1; skipped <= 7; skipped++) if (key_calls[skipped]) return NO;
+    }
+    key_failure = 0;
+    for (NSNumber *invalid in @[@1, @5, @6]) {
+        key_invalid = invalid.intValue; key_unloads = 0;
+        memset(key_calls, 0, sizeof(key_calls));
+        NSMutableDictionary *owned = [NSMutableDictionary dictionary];
+        NSDictionary *response = generate_identity(&keys, certificate, YES, 9, owned);
+        if (owned.count || !response[@"error"] || [response[@"status"] intValue] ||
+            key_unloads != (key_invalid == 1 ? 0 : 1) ||
+            (key_invalid == 5 && key_calls[6])) return NO;
+    }
+    key_invalid = 0;
+    for (NSNumber *attested in @[@YES, @NO]) {
+        key_unloads = 0;
+        memset(key_calls, 0, sizeof(key_calls));
+        NSMutableDictionary *owned = [NSMutableDictionary dictionary];
+        NSDictionary *response = generate_identity(&keys, certificate, attested.boolValue, 9, owned);
+        NSDictionary *identity = owned[response[@"identity"]];
+        if ([response[@"status"] intValue] || response[@"error"] || owned.count != 1 || !identity ||
+            [identity[@"bag"] intValue] != 17 || ![identity[@"attested"] isEqual:attested] ||
+            [identity[@"ltk"] length] != 8 || [response[@"bytes"] intValue] != 8 || key_unloads ||
+            key_calls[2] != (attested.boolValue ? 1 : 0)) return NO;
+    }
+    return YES;
+}
+
 int main(void) {
     @autoreleasepool {
         NSMutableSet *owned = [NSMutableSet setWithArray:@[@17, @91]];
@@ -62,7 +166,8 @@ int main(void) {
         missing = load_keystore(&keys, NULL, fake_symbol, fake_fallback);
         if (missing.count != 17 || symbol_calls || fallback_calls != 18 ||
             (void *)keys.remote_session != (void *)fake_fallback || keys.reset_session) return 11;
-        puts("{\"cases\":11,\"passed\":true,\"real_aks_accessed\":false}");
+        if (!check_generation()) return 12;
+        puts("{\"cases\":22,\"passed\":true,\"real_aks_accessed\":false}");
     }
     return 0;
 }

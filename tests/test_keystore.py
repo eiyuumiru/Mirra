@@ -1,12 +1,14 @@
 from pathlib import Path
+import json
 import sys
 import time
 import unittest
 from unittest.mock import Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from keystore import AksBroker, MAX_SESSIONS, NO_MEMORY, SESSION_BASE, SESSION_END, UNAVAIWORKSPACELE
+from keystore import AksBroker, MAX_SESSIONS, NO_MEMORY, SESSION_BASE, SESSION_END, UNAVAIWORKSPACELE, verify_attested_key
 from transport import Endpoint, EndpointError
+from test_provisioning import fixture_ltk
 
 
 class BrokerSessionTests(unittest.TestCase):
@@ -20,6 +22,31 @@ class BrokerSessionTests(unittest.TestCase):
     def session(self, broker):
         return broker.execute({'operation': 'session_signed', 'local_ltk': 'owned-local',
                                'remote_ltk': 'owned-remote', 'flags': 2})
+
+    def test_invalid_successful_generation_never_publishes_a_broker_identity(self):
+        broker, endpoint = self.broker()
+        endpoint.call.return_value = {'status': 0, 'error': 'keystore_parameters_unavailable',
+                                      'operation_stage': 'aks_params_create'}
+        result = broker.execute({'operation': 'generate', 'key_class': 9})
+        self.assertEqual(result['status'], UNAVAIWORKSPACELE)
+        self.assertEqual(result['backend_operation']['status'], 0)
+        self.assertFalse(broker.classes)
+        self.assertFalse(broker.wire_keys)
+        self.assertFalse(broker.execute({'operation': 'health'})['ready'])
+
+    def test_malformed_generation_and_unsupported_wire_layout_never_publish_keys(self):
+        for fields in ({'status': False}, {'identity': ['bad-type']},
+                       {'ltk': 123}, {'ltk': 'dW5zdXBwb3J0ZWQ='}):
+            with self.subTest(fields=fields):
+                broker, endpoint = self.broker()
+                endpoint.call.return_value = dict(
+                    {'status': 0, 'identity': 'private-identity', 'ltk': fixture_ltk()}, **fields)
+                result = broker.execute({'operation': 'generate', 'key_class': 9})
+                self.assertEqual(result['status'], UNAVAIWORKSPACELE)
+                self.assertFalse(broker.classes)
+                self.assertFalse(broker.wire_keys)
+                self.assertNotIn('ltk', result)
+                self.assertFalse(broker.execute({'operation': 'health'})['ready'])
 
     def test_handles_remain_distinct_after_thousands_of_reconnects(self):
         broker, endpoint = self.broker()
@@ -146,3 +173,53 @@ for line in sys.stdin:
             self.assertEqual(result['remaining_sessions'], 15)
             with self.assertRaises(EndpointError):
                 endpoint.call('validate')
+
+
+class AttestedKeyTests(unittest.TestCase):
+    def endpoint(self):
+        endpoint = Mock()
+        endpoint.ready = {'product_type': 'iPhone10,5', 'os_version': '16.7.10',
+                          'os_build': '20H350', 'process_architecture': 'arm64',
+                          'serial': 'private-serial', 'dcrt_sha256': 'private-certificate'}
+        return endpoint
+
+    def test_native_failure_keeps_exact_status_and_does_not_call_validate(self):
+        endpoint = self.endpoint()
+        endpoint.call.return_value = {'status': -7, 'status_hex': 'untrusted-status',
+                                      'operation_stage': 'aks_create_signing_key_with_params',
+                                      'identity': 'private-identity', 'ltk': 'private-key'}
+        with self.assertRaises(EndpointError) as caught:
+            verify_attested_key(endpoint)
+        error = caught.exception
+        self.assertEqual(error.code, 'bridge_attested_key_unavailable')
+        self.assertEqual(error.details['status'], -7)
+        self.assertEqual(error.details['status_hex'], '0xfffffff9')
+        self.assertEqual(error.details['operation_stage'], 'aks_create_signing_key_with_params')
+        self.assertEqual(error.details['capabilities']['product_type'], 'iPhone10,5')
+        self.assertNotIn('private-', json.dumps(error.details))
+        endpoint.call.assert_called_once_with('generate', attested=True, key_class=9)
+
+    def test_malformed_successes_and_parameters_failure_are_rejected(self):
+        for response in ({'status': False, 'identity': 'id', 'ltk': fixture_ltk()},
+                         {'status': 0, 'identity': 'id'},
+                         {'status': 0, 'identity': 'id', 'ltk': fixture_ltk(), 'error': 'invalid_signing_key_result'}):
+            endpoint = self.endpoint()
+            endpoint.call.return_value = response
+            with self.subTest(response=response), self.assertRaises(EndpointError):
+                verify_attested_key(endpoint)
+            self.assertEqual(endpoint.call.call_count, 1)
+
+    def test_validation_failure_and_unsupported_wire_format_are_distinct(self):
+        endpoint = self.endpoint()
+        generated = {'status': 0, 'identity': 'private-identity', 'ltk': fixture_ltk()}
+        endpoint.call.side_effect = [generated, {'status': -9, 'operation_stage': 'aks_validate_local_key'}]
+        with self.assertRaises(EndpointError) as caught:
+            verify_attested_key(endpoint)
+        self.assertEqual(caught.exception.code, 'bridge_attested_key_rejected')
+        self.assertEqual(caught.exception.details['status'], -9)
+        endpoint.call.side_effect = [{**generated, 'ltk': 'dW5zdXBwb3J0ZWQ='}, {'status': 0}]
+        with self.assertRaises(EndpointError) as caught:
+            verify_attested_key(endpoint)
+        self.assertEqual(caught.exception.code, 'bridge_key_layout_unsupported')
+        endpoint.call.side_effect = [generated, {'status': 0}]
+        self.assertTrue(verify_attested_key(endpoint)['original_fields_byte_identical'])

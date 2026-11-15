@@ -10,6 +10,7 @@ import secrets
 import subprocess
 
 from provisioning import new_profile, fingerprints, pin_host, authorize, deploy, destination, remote, RemoteSetupError, signing_tool, verify_key
+from transport import EndpointError
 from compatibility import inspect_media_profile, supported_apple_app
 from configuration import ROOT, load_config
 from installation import NativeService
@@ -34,8 +35,12 @@ SETUP_MESSAGES = {
     'required_keystore_symbols_unavailable': 'The bridge is missing keystore functions needed by Mirra. The setup diagnostics list the missing functions. Report its iOS version and jailbreak for compatibility review.',
     'certificate_api_unavailable': 'This bridge does not expose the device-certificate API used by Mirra. Keep the setup diagnostics for compatibility review.',
     'certificate_issuance_api_unavailable': 'This bridge cannot request the device certificate through Mirra’s current API. Keep the setup diagnostics for compatibility review.',
-    'roothide_code_directory_unavailable': 'RootHide could not create Mirra’s code folder. Start a new bridge setup using the phone’s root SSH account, then prepare the connection again. If you already used root, keep the logs for review.',
-    'roothide_path_translation_unavailable': 'Mirra could not use RootHide’s filesystem tools. Check that Dopamine/RootHide is active and its jbroot and rootfs tools are installed, then retry.',
+    'roothide_code_directory_unavailable': 'RootHide is currently unsupported by Mirra. Its helper setup failed. Use a compatible bridge with an active supported jailbreak; changing the SSH account alone does not establish support.',
+    'roothide_path_translation_unavailable': 'RootHide is currently unsupported by Mirra. Its filesystem tools could not be verified. Use a compatible bridge with an active supported jailbreak.',
+    'bridge_attested_key_unavailable': 'The bridge could not create Mirra’s attested key. Check the bridge’s SEP availability, jailbreak restrictions and keystore compatibility. Working SSH does not verify these operations. Use a bridge with working attested-key support; the existing setup error records the failed operation.',
+    'bridge_attested_key_rejected': 'The bridge rejected the attested key it just created. Its certificate, jailbreak or SEP operations may be incompatible. Keep the existing setup error for review and use a bridge with working attested-key support.',
+    'bridge_key_layout_unsupported': 'The bridge accepted its key, but its format is unsupported by Mirra’s broker. Keep the existing setup error for compatibility review; retrying SSH or issuing another certificate does not verify this format.',
+    'device_certificate_unavailable': 'The bridge helper could not read its saved device certificate. Reopen bridge setup and check certificate preparation before starting support.',
     'helper_terminated': 'SSH login worked, but the phone stopped Mirra’s helper. Show log includes the launch status. Keep those logs and report the bridge’s iOS and jailbreak versions.',
 }
 
@@ -317,7 +322,7 @@ class SetupWizard:
                  'connect': 'Check the SSH account and password. The phone also needs ldid available in its SSH shell.',
                  'provision': 'Certificate or helper setup did not finish. Keep the phone online with its jailbreak active, then retry.',
                  'finish': 'Support could not switch to this bridge. Keep diagnostics and check service status before retrying.'}
-        code = error.code if isinstance(error, (SetupIssue, RemoteSetupError)) and error.code in SETUP_MESSAGES else None
+        code = error.code if isinstance(error, (SetupIssue, EndpointError)) and error.code in SETUP_MESSAGES else None
         message = SETUP_MESSAGES[code] if code else hints.get(action, 'Setup could not finish. Reopen setup and try again.')
         if action == 'begin':
             identifier = self.started_id
@@ -329,7 +334,7 @@ class SetupWizard:
             # Detailed errors stay in private local files, never in the public status.
             directory, _, _ = self.paths(identifier)
             detail = {'action': action, 'type': type(error).__name__, 'message': redact_text(str(error))[:2000]}
-            if isinstance(error, RemoteSetupError):
+            if isinstance(error, EndpointError):
                 detail.update(error_code=error.code, details=redact_value(error.details))
             write_state(directory / 'error.json', detail)
             return self.describe(state)

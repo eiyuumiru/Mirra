@@ -16,7 +16,10 @@ MAX_REPLY = 262144
 
 
 class EndpointError(RuntimeError):
-    pass
+    def __init__(self, message, code=None, details=None):
+        super().__init__(message)
+        self.code = code
+        self.details = details or {}
 
 
 class Endpoint:
@@ -42,7 +45,13 @@ class Endpoint:
             self.ready = self.read()
             activity.emit('Endpoint', 'greeting', pid=self.process.pid, reply=self.ready)
             if self.ready.get('ready') is not True:
-                raise EndpointError('Backend endpoint did not report ready')
+                from keystore import bridge_capabilities
+                code = self.ready.get('error')
+                if code not in ('required_keystore_symbols_unavailable', 'keystore_library_unavailable',
+                                'device_certificate_unavailable', 'roothide_path_translation_unavailable'):
+                    code = None
+                raise EndpointError('Backend endpoint did not report ready', code,
+                                    {'capabilities': bridge_capabilities(self.ready)})
             if self.ready.get('protocol_version', 1) != 1:
                 raise EndpointError('Unsupported backend protocol version')
             fingerprint = self.ready.get('dcrt_sha256')

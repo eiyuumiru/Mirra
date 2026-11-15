@@ -36,6 +36,27 @@ class BridgeDiagnosticTests(unittest.TestCase):
                 self.assertEqual(report['status'], 'missing')
                 self.assertIn('attested signing identity', report['detail'])
 
+    def test_endpoint_failure_retains_native_stage_and_status(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            certificate = root / 'certificate.der'; certificate.write_bytes(b'fixture')
+            profile = root / 'config.json'; profile.write_text('{}')
+            config = replace(load_config(profile), certificate_file=certificate)
+            with patch('transport.Endpoint') as endpoint:
+                bridge = endpoint.return_value.__enter__.return_value
+                bridge.ready = {'dcrt_bytes': 7, 'os_version': '15.8.8', 'product_type': 'iPhone8,2'}
+                bridge.call.return_value = {'status': -536870212,
+                    'operation_stage': 'aks_create_signing_key_with_params',
+                    'identity': 'private-identity', 'ltk': 'private-key'}
+                report = inspect_backend(config)
+            self.assertEqual(report['error_code'], 'bridge_attested_key_unavailable')
+            details = report['operation_details']
+            self.assertEqual(details['status_hex'], '0xe00002bc')
+            self.assertEqual(details['operation_stage'], 'aks_create_signing_key_with_params')
+            self.assertEqual(details['capabilities']['os_version'], '15.8.8')
+            self.assertNotIn('private', json.dumps(report))
+
+
 
 if __name__ == '__main__':
     unittest.main()

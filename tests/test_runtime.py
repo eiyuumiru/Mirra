@@ -146,6 +146,17 @@ class TransportTests(unittest.TestCase):
         self.addCleanup(endpoint.close)
         return endpoint
 
+    def test_unready_greeting_preserves_known_capability_failure_without_secrets(self):
+        greeting = {'ready': False, 'error': 'required_keystore_symbols_unavailable',
+                    'missing_symbols': ['aks_remote_session'], 'os_version': '15.8.4',
+                    'process_architecture': 'arm64', 'serial': 'private-serial', 'dcrt': 'private-certificate'}
+        program = 'import json; print(json.dumps(' + repr(greeting) + '), flush=True)'
+        with self.assertRaises(EndpointError) as caught:
+            self.endpoint(program)
+        self.assertEqual(caught.exception.code, greeting['error'])
+        self.assertEqual(caught.exception.details['capabilities']['missing_symbols'], ['aks_remote_session'])
+        self.assertNotIn('private-', json.dumps(caught.exception.details))
+
     def test_mismatched_certificate_and_unknown_protocol_are_rejected(self):
         greetings = [({'ready': True, 'dcrt_sha256': 'a' * 64}, 'b' * 64),
                      ({'ready': True, 'protocol_version': 2}, None)]

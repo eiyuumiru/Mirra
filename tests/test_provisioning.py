@@ -15,6 +15,7 @@ from bridgepaths import ENVIRONMENT_SCRIPT, ROOTHIDE_ENTITLEMENTS
 from compiler import write_link_stubs
 from configuration import load_config
 from wire import wrap
+from transport import EndpointError
 
 
 def fixture_ltk():
@@ -168,7 +169,7 @@ class CertificateFlowTests(unittest.TestCase):
         self.binary = self.root / 'endpoint'; self.binary.write_bytes(b'fixture binary')
         self.certificate = b'fixture DER'; self.digest = hashlib.sha256(self.certificate).hexdigest()
 
-    def attempt(self, cached_error=None, ltk=None, path_mode='native', rootless=False, helper_error=None, **options):
+    def attempt(self, cached_error=None, ltk=None, path_mode='native', rootless=False, helper_error=None, key_reply=None, **options):
         calls = []
         inputs = []
         def command(config, arguments, data=None, timeout=20):
@@ -192,6 +193,8 @@ class CertificateFlowTests(unittest.TestCase):
             instance = endpoint.return_value.__enter__.return_value
             instance.ready = {'dcrt_sha256': self.digest}
             instance.call.return_value = {'status': 0, 'identity': 'fixture', 'ltk': fixture_ltk() if ltk is None else ltk}
+            if key_reply is not None:
+                instance.call.return_value = key_reply
             try:
                 result = deploy(self.config, self.root / 'ready.json', self.binary, **options)
             finally:
@@ -205,6 +208,16 @@ class CertificateFlowTests(unittest.TestCase):
         self.assertFalse(any('--issue-certificate' in call for call in self.calls))
         self.assertTrue(result['wire_layout_validated'])
         self.assertTrue(any(call[0] == '/var/jb/usr/bin/ldid' for call in self.calls))
+
+    def test_attested_key_failure_is_preserved_before_ready_publication(self):
+        with self.assertRaises(EndpointError) as caught:
+            self.attempt(key_reply={'status': -7, 'operation_stage': 'aks_create_signing_key_with_params'},
+                         issue_if_missing=True)
+        self.assertEqual(caught.exception.code, 'bridge_attested_key_unavailable')
+        self.assertEqual(caught.exception.details['status'], -7)
+        self.assertFalse((self.root / 'ready.json').exists())
+        self.assertFalse((self.root / 'certificate.der').exists())
+        self.assertFalse(any('--issue-certificate' in call for call in self.calls))
 
     def test_rootless_deployment_persists_bootstrap_paths_through_signing_and_launch(self):
         result = self.attempt(rootless=True)
@@ -274,7 +287,7 @@ class CertificateFlowTests(unittest.TestCase):
         self.assertIn('Authenticated to', str(caught.exception))
 
     def test_bridge_key_layout_is_checked_before_publishing_ready_profile(self):
-        with self.assertRaisesRegex(ValueError, 'attested signing identity'):
+        with self.assertRaisesRegex(EndpointError, 'attested signing identity'):
             self.attempt(ltk=base64.b64encode(b'unsupported-key-layout').decode())
         self.assertFalse((self.root / 'ready.json').exists())
         self.assertFalse((self.root / 'certificate.der').exists())

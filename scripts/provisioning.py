@@ -14,20 +14,17 @@ import stat
 import subprocess
 import tempfile
 
-from transport import Endpoint
+from transport import Endpoint, EndpointError
 from configuration import ROOT, load_config
 from state import write_state
 from macho import require_ios_endpoint
-from wire import platform_ltk
+from keystore import bridge_capabilities, verify_attested_key
 from bridgepaths import ENVIRONMENT_SCRIPT, ROOTHIDE_CODE_ROOT, ROOTHIDE_ENTITLEMENTS, ROOTLESS_DEPLOYMENT_ROOT, helper_command
 import activity
 
 
-class RemoteSetupError(RuntimeError):
-    def __init__(self, message, code=None, details=None):
-        super().__init__(message)
-        self.code = code
-        self.details = details or {}
+class RemoteSetupError(EndpointError):
+    pass
 
 
 def destination(config):
@@ -150,6 +147,12 @@ def remote(config, arguments, data=None, timeout=20):
             if isinstance(error, dict) and isinstance(error.get('error'), str):
                 code = error['error']
                 message = message or code
+                capabilities = bridge_capabilities(error)
+                if capabilities:
+                    details['capabilities'] = capabilities
+                for name in ('error_code', 'completed'):
+                    if type(error.get(name)) is (bool if name == 'completed' else int):
+                        details[name] = error[name]
                 missing = error.get('missing_symbols')
                 if isinstance(missing, list) and missing and all(
                         isinstance(s, str) and re.fullmatch(r'aks_[a-z0-9_]+', s) for s in missing):
@@ -260,19 +263,11 @@ def verify_key(config, digest):
     with Endpoint(config, expected_certificate_sha256=digest) as endpoint:
         if endpoint.ready.get('dcrt_sha256') != digest:
             raise RuntimeError('Endpoint is using a different device certificate')
-        key = endpoint.call('generate', attested=True, key_class=9)
-        if key.get('status') != 0 or not key.get('identity'):
-            raise RuntimeError('The device cannot create the required attested key: ' +
-                               str(key.get('status_hex', key.get('error', key.get('status')))))
-        validated = endpoint.call('validate', identity=key['identity'])
-        if validated.get('status') != 0:
-            raise RuntimeError('The device rejected its fresh attested key: ' +
-                               str(validated.get('status_hex', validated.get('error', validated.get('status')))))
         # A key accepted by the bridge may still have a layout the host broker
         # cannot adapt. Check the actual broker wire format before publishing.
-        _, proof = platform_ltk(key.get('ltk', ''), 3)
+        proof = verify_attested_key(endpoint)
         activity.emit('Certificate', 'attested-key verification complete', wire_layout=proof,
-                      generate_status=key.get('status'), validate_status=validated.get('status'))
+                      generate_status=0, validate_status=0)
         return proof
 
 

@@ -634,6 +634,72 @@ static int export_certificate(const char *output, BOOL issue) {
 #endif
 }
 
+static NSDictionary *generate_identity(const KeyStore *keys, NSData *dcrt, BOOL attested,
+                                      int key_class, NSMutableDictionary *identities) {
+    uint8_t passcode[32];
+    int status = SecRandomCopyBytes(kSecRandomDefault, sizeof(passcode), passcode);
+    if (status != 0) {
+        NSMutableDictionary *response = result(status);
+        response[@"operation_stage"] = @"SecRandomCopyBytes";
+        return response;
+    }
+    int bag = -1;
+    NSString *stage = @"aks_create_bag";
+    NSString *error = nil;
+    status = keys->create_bag(passcode, sizeof(passcode), 0, &bag);
+    volatile uint8_t *secret = passcode;
+    for (size_t i = 0; i < sizeof(passcode); i++) secret[i] = 0;
+    void *blob = NULL;
+    size_t size = 0;
+    if (status == 0 && bag < 0) error = @"invalid_keybag_result";
+    if (status == 0 && !error) {
+        if (!attested) {
+            stage = @"aks_create_signing_key";
+            status = keys->create_key(bag, key_class, &blob, &size);
+        } else {
+            stage = @"aks_params_create";
+            void *params = keys->params_create(NULL, 0);
+            int64_t flag = 4;
+            const void *der = NULL;
+            size_t der_size = 0;
+            if (!params) error = @"keystore_parameters_unavailable";
+            if (!error) {
+                stage = @"aks_params_set_data";
+                status = keys->params_data(params, 21, dcrt.bytes, dcrt.length);
+            }
+            if (status == 0 && !error) {
+                stage = @"aks_params_set_number";
+                status = keys->params_number(params, 20, &flag);
+            }
+            if (status == 0 && !error) {
+                stage = @"aks_params_get_der";
+                status = keys->params_der(params, &der, &der_size);
+                if (status == 0 && (!der || !der_size)) error = @"keystore_parameters_invalid";
+            }
+            if (status == 0 && !error) {
+                stage = @"aks_create_signing_key_with_params";
+                status = keys->create_key_params(bag, key_class, der, der_size, &blob, &size);
+            }
+        }
+    }
+    NSMutableDictionary *response = result(status);
+    response[@"operation_stage"] = stage;
+    if (status == 0 && !error && blob && size && size <= 65536) {
+        NSString *identifier = NSUUID.UUID.UUIDString;
+        NSData *ltk = [NSData dataWithBytes:blob length:size];
+        identities[identifier] = @{@"bag": @(bag), @"ltk": ltk, @"attested": @(attested), @"key_class": @(key_class)};
+        response[@"identity"] = identifier;
+        response[@"ltk"] = [ltk base64EncodedStringWithOptions:0];
+        response[@"bytes"] = @(size);
+        response[@"key_class"] = @(key_class);
+    } else {
+        if (status == 0) response[@"error"] = error ?: @"invalid_signing_key_result";
+        if (bag >= 0) keys->unload_bag(bag);
+    }
+    clear_blob(blob, size);
+    return response;
+}
+
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         if (argc == 3 && (!strcmp(argv[1], "--export-certificate") || !strcmp(argv[1], "--issue-certificate")))
@@ -713,41 +779,7 @@ int main(int argc, const char *argv[]) {
                         reply(@{@"error": @"identity_limit_or_missing_dcrt"});
                         continue;
                     }
-                    uint8_t passcode[32];
-                    if (SecRandomCopyBytes(kSecRandomDefault, sizeof(passcode), passcode) != 0) return 1;
-                    int bag = -1;
-                    int status = keys.create_bag(passcode, sizeof(passcode), 0, &bag);
-                    memset(passcode, 0, sizeof(passcode));
-                    void *blob = NULL;
-                    size_t size = 0;
-                    if (status == 0 && bag >= 0) {
-                        if (!attested) {
-                            status = keys.create_key(bag, key_class, &blob, &size);
-                        } else {
-                            void *params = keys.params_create(NULL, 0);
-                            int64_t flag = 4;
-                            const void *der = NULL;
-                            size_t der_size = 0;
-                            status = keys.params_data(params, 21, dcrt.bytes, dcrt.length);
-                            if (status == 0) status = keys.params_number(params, 20, &flag);
-                            if (status == 0) status = keys.params_der(params, &der, &der_size);
-                            if (status == 0) status = keys.create_key_params(bag, key_class, der, der_size, &blob, &size);
-                        }
-                    }
-                    NSMutableDictionary *response = result(status);
-                    if (status == 0 && blob && size && size <= 65536) {
-                        NSString *identifier = NSUUID.UUID.UUIDString;
-                        NSData *ltk = [NSData dataWithBytes:blob length:size];
-                        identities[identifier] = @{@"bag": @(bag), @"ltk": ltk, @"attested": @(attested), @"key_class": @(key_class)};
-                        response[@"identity"] = identifier;
-                        response[@"ltk"] = [ltk base64EncodedStringWithOptions:0];
-                        response[@"bytes"] = @(size);
-                        response[@"key_class"] = @(key_class);
-                    } else if (bag >= 0) {
-                        keys.unload_bag(bag);
-                    }
-                    clear_blob(blob, size);
-                    reply(response);
+                    reply(generate_identity(&keys, dcrt, attested, key_class, identities));
                     continue;
                 }
                 if ([operation isEqual:@"validate"]) {
@@ -757,7 +789,9 @@ int main(int argc, const char *argv[]) {
                         continue;
                     }
                     NSData *key = identity[@"ltk"];
-                    reply(result(keys.validate_key([identity[@"bag"] intValue], [identity[@"key_class"] intValue], key.bytes, key.length)));
+                    NSMutableDictionary *response = result(keys.validate_key([identity[@"bag"] intValue], [identity[@"key_class"] intValue], key.bytes, key.length));
+                    response[@"operation_stage"] = @"aks_validate_local_key";
+                    reply(response);
                     continue;
                 }
                 if ([operation isEqual:@"get_state"] || [operation isEqual:@"drop"]) {

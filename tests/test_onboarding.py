@@ -13,6 +13,7 @@ from configuration import load_config
 from installation import NativeService
 from onboarding import SetupWizard, SetupIssue
 from provisioning import fingerprints, RemoteSetupError
+from transport import EndpointError
 from state import write_state
 
 
@@ -234,15 +235,31 @@ class OnboardingTests(unittest.TestCase):
         self.assertIn('missing keystore functions', result['error'])
         self.assertNotIn('/private/secret', json.dumps(result))
 
-    def test_roothide_permission_error_explains_root_access_without_advancing_setup(self):
+    def test_roothide_error_reports_unsupported_without_advancing_setup(self):
         state = self.authorize_stage()
         saved = self.wizard.load(); saved['phase'] = 'deploy'; self.wizard.save(saved)
         error = RemoteSetupError('Permission denied /private/phone/path', 'roothide_code_directory_unavailable')
         result = self.wizard.failure(state['id'], 'provision', error)
         self.assertEqual(result['phase'], 'deploy')
         self.assertEqual(result['error_code'], 'roothide_code_directory_unavailable')
-        self.assertIn('root SSH account', result['error'])
+        self.assertIn('RootHide is currently unsupported', result['error'])
         self.assertNotIn('/private/phone/path', json.dumps(result))
+
+    def test_attested_key_failure_is_actionable_and_keeps_native_status_private(self):
+        state = self.authorize_stage()
+        error = EndpointError('The bridge cannot create the required attested key',
+                              'bridge_attested_key_unavailable',
+                              {'operation': 'generate', 'operation_stage': 'aks_create_signing_key_with_params',
+                               'status': -7, 'status_hex': '0xfffffff9'})
+        result = self.wizard.failure(state['id'], 'provision', error)
+        self.assertEqual(result['error_code'], 'bridge_attested_key_unavailable')
+        self.assertIn('SEP availability', result['error'])
+        self.assertNotIn('status_hex', json.dumps(result))
+        directory, _, ready = self.wizard.paths(state['id'])
+        detail = self.wizard.read(directory / 'error.json')
+        self.assertEqual(detail['details']['status'], -7)
+        self.assertEqual(detail['details']['operation_stage'], 'aks_create_signing_key_with_params')
+        self.assertFalse(ready.exists())
 
     def test_actual_helper_exit_status_survives_in_private_failure_details(self):
         state = self.authorize_stage()

@@ -11,6 +11,8 @@ import sys
 from configuration import ConfigError,load_config,ROOT
 from usbmux import list_devices,product_type,select_device
 from compatibility import inspect_media_profile, supported_apple_app
+from keystore import bridge_capabilities, verify_attested_key
+from transport import EndpointError
 
 
 def inspect_host(config):
@@ -61,22 +63,17 @@ def inspect_backend(config):
         with Endpoint(config) as endpoint:
             if not endpoint.ready.get('dcrt_bytes'):
                 raise RuntimeError('The device endpoint has no certificate')
-            key = endpoint.call('generate',attested=True,key_class=9)
-            if key.get('status')!=0 or not key.get('identity') or not key.get('ltk'):
-                raise RuntimeError('Attested key generation failed: '+str(key.get('status_hex',key.get('error'))))
-            verified = endpoint.call('validate',identity=key['identity'])
-            if verified.get('status')!=0:
-                raise RuntimeError('The device rejected its fresh local signing key')
-            from wire import platform_ltk
-            _, wire = platform_ltk(key['ltk'], 3)
+            wire = verify_attested_key(endpoint)
             certificate_match = endpoint.certificate_binding_verified
             # Public capabilities only: no host, serial, certificate or key.
-            capabilities = {name:endpoint.ready[name] for name in (
-                'product_type','os_version','os_build','process_architecture','missing_symbols') if name in endpoint.ready}
+            capabilities = bridge_capabilities(endpoint.ready)
         return {'check':'backend_attested_key','status':'pass',
                 'certificate_binding_verified':certificate_match,
                 'wire_layout_validated':wire['original_fields_byte_identical'], 'capabilities':capabilities,
                 'detail':'Fresh isolated attested key and broker wire layout validated; native phone authentication is not tested'}
+    except EndpointError as error:
+        return {'check':'backend_attested_key','status':'missing','detail':str(error),
+                'error_code':error.code, 'operation_details':error.details}
     except (OSError,RuntimeError,ValueError) as error:
         return {'check':'backend_attested_key','status':'missing','detail':str(error)}
 

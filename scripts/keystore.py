@@ -1,5 +1,6 @@
 """Own backend identities and translate only this broker's session handles."""
 import base64
+import re
 import time
 
 from transport import EndpointError
@@ -11,6 +12,65 @@ MAX_SESSIONS = 16  # The endpoint's isolated-session limit.
 MAX_RESET_SECONDS = 10  # Leave room inside the shim's 15-second socket timeout.
 NO_MEMORY = -536870211  # kIOReturnNoMemory (0xe00002bd)
 UNAVAIWORKSPACELE = -536870212  # kIOReturnError (0xe00002bc)
+
+
+def bridge_capabilities(report):
+    """Select hardware/API observations without certificates or device identities."""
+    selected = {}
+    patterns = {'product_type': r'iPhone\d+,\d+', 'os_version': r'\d+(?:\.\d+){1,2}',
+                'os_build': r'\d+[A-Z]\d+[a-z]?', 'minimum_ios': r'\d+(?:\.\d+){1,2}'}
+    for name, pattern in patterns.items():
+        value = report.get(name)
+        if isinstance(value, str) and len(value) <= 32 and re.fullmatch(pattern, value):
+            selected[name] = value
+    if report.get('process_architecture') in ('arm64', 'arm64e', 'x86_64'):
+        selected['process_architecture'] = report['process_architecture']
+    missing = report.get('missing_symbols')
+    if isinstance(missing, list) and len(missing) <= 18 and all(
+            isinstance(value, str) and re.fullmatch(r'aks_[a-z0-9_]{1,64}', value) for value in missing):
+        selected['missing_symbols'] = missing
+    return selected
+
+
+def operation_details(report):
+    """Preserve native status and stage; never copy an identity or key blob."""
+    selected = {}
+    if type(report.get('status')) is int:
+        selected['status'] = report['status']
+        selected['status_hex'] = f"0x{report['status'] & 0xffffffff:08x}"
+    stage = report.get('operation_stage')
+    if stage in ('SecRandomCopyBytes', 'aks_create_bag', 'aks_create_signing_key',
+                 'aks_params_create', 'aks_params_set_data', 'aks_params_set_number',
+                 'aks_params_get_der', 'aks_create_signing_key_with_params', 'aks_validate_local_key'):
+        selected['operation_stage'] = stage
+    return selected
+
+
+def valid_generated_key(report):
+    return (type(report.get('status')) is int and report['status'] == 0 and not report.get('error')
+            and isinstance(report.get('identity'), str) and bool(report['identity'])
+            and isinstance(report.get('ltk'), str) and bool(report['ltk']))
+
+
+def verify_attested_key(endpoint):
+    """Validate one isolated key with the same checks during setup and diagnosis."""
+    capabilities = bridge_capabilities(endpoint.ready)
+    generated = endpoint.call('generate', attested=True, key_class=9)
+    if not valid_generated_key(generated):
+        details = {'operation': 'generate', 'capabilities': capabilities, **operation_details(generated)}
+        raise EndpointError('The bridge cannot create the required attested key',
+                            'bridge_attested_key_unavailable', details)
+    validated = endpoint.call('validate', identity=generated['identity'])
+    if type(validated.get('status')) is not int or validated['status'] != 0 or validated.get('error'):
+        details = {'operation': 'validate', 'capabilities': capabilities, **operation_details(validated)}
+        raise EndpointError('The bridge rejected its fresh attested key',
+                            'bridge_attested_key_rejected', details)
+    try:
+        _, proof = platform_ltk(generated['ltk'], 3)
+    except ValueError as error:
+        raise EndpointError(str(error), 'bridge_key_layout_unsupported',
+                            {'operation': 'wire_layout', 'capabilities': capabilities}) from error
+    return proof
 
 
 class AksBroker:
@@ -81,9 +141,18 @@ class AksBroker:
                 return {'error': 'invalid_key_class'}
             if key_class not in self.classes:
                 response = self.endpoint.call('generate', attested=True, key_class=key_class)
-                if response.get('status') != 0:
+                if type(response.get('status')) is int and response['status'] != 0:
                     return response
-                wire, _proof = platform_ltk(response['ltk'], 3)
+                if not valid_generated_key(response):
+                    self.failure = 'invalid_signing_key_result'
+                    return {'status': UNAVAIWORKSPACELE, 'error': self.failure,
+                            'backend_operation': operation_details(response)}
+                try:
+                    wire, _proof = platform_ltk(response['ltk'], 3)
+                except ValueError:
+                    self.failure = 'unsupported_signing_key_layout'
+                    return {'status': UNAVAIWORKSPACELE, 'error': self.failure,
+                            'backend_operation': operation_details(response)}
                 self.wire_keys[key_class] = wire
                 self.identities[wire] = response['identity']
                 self.classes[key_class] = response
