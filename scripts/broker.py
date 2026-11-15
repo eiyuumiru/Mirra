@@ -13,7 +13,7 @@ import threading
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-from transport import Endpoint
+from transport import Endpoint, EndpointError, transport_details
 from configuration import load_config
 from keystore import AksBroker
 from lifetime import watch_parent_pipe
@@ -72,10 +72,16 @@ class Request(socketserver.BaseRequestHandler):
                 response = broker.execute(request)
             data = json.dumps(response).encode()
             self.request.sendall(struct.pack(">I", len(data)) + data)
-            print(json.dumps({"operation": request.get("operation"), "status": response.get("status_hex", response.get("status")),
-                              "bytes": response.get("bytes"), "error": response.get("error")}), flush=True)
+            event = {"operation": request.get("operation"), "status": response.get("status_hex", response.get("status")),
+                     "bytes": response.get("bytes"), "error": response.get("error")}
+            if response.get('transport_failure'):
+                event['transport_failure'] = response['transport_failure']
+            print(json.dumps(event), flush=True)
         except Exception as error:
-            print(json.dumps({"transport_error": f"{type(error).__name__}: {error}"}), flush=True)
+            event = {"transport_error": f"{type(error).__name__}: {error}"}
+            if isinstance(error, EndpointError):
+                event['transport_failure'] = transport_details(error)
+            print(json.dumps(event), flush=True)
 
 
 class Server(socketserver.ThreadingUnixStreamServer):

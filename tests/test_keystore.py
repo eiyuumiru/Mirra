@@ -7,13 +7,14 @@ from unittest.mock import Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from keystore import AksBroker, MAX_SESSIONS, NO_MEMORY, SESSION_BASE, SESSION_END, UNAVAIWORKSPACELE, verify_attested_key
-from transport import Endpoint, EndpointError
+from transport import Endpoint, EndpointError, transport_details
 from test_provisioning import fixture_ltk
 
 
 class BrokerSessionTests(unittest.TestCase):
     def broker(self):
         endpoint = Mock(timeout=1)
+        endpoint.failure = None
         endpoint.process.poll.return_value = None
         broker = AksBroker(endpoint)
         broker.identities['owned-local'] = 'private-identity'
@@ -117,6 +118,46 @@ class BrokerSessionTests(unittest.TestCase):
                 self.assertFalse(broker.execute({'operation': 'health'})['ready'])
                 self.assertFalse(broker.execute({'operation': 'health'})['ready'])
                 endpoint.call.assert_called_once_with('validate', identity='private-identity')
+
+    def test_health_retains_the_first_transport_failure_without_request_material(self):
+        broker, endpoint = self.broker()
+        broker.classes[9] = {'identity': 'private-identity'}
+        endpoint.call.side_effect = EndpointError('private input', 'endpoint_reply_timeout',
+            {'operation': 'validate', 'reply_bytes': 9, 'identity': 'private-identity',
+             'data': 'private-key', 'stderr': 'private-stderr'})
+        first = broker.execute({'operation': 'health'})
+        endpoint.process.poll.return_value = 255
+        second = broker.execute({'operation': 'health'})
+        self.assertEqual(first, second)
+        self.assertEqual(first['transport_failure'],
+                         {'code': 'endpoint_reply_timeout', 'operation': 'validate', 'reply_bytes': 9})
+        self.assertNotIn('private-', json.dumps(first))
+        endpoint.call.assert_called_once()
+
+    def test_health_uses_the_abandoned_streams_original_error(self):
+        broker, endpoint = self.broker()
+        broker.classes[9] = {'identity': 'private-identity'}
+        endpoint.failure = EndpointError('Original write failure', 'endpoint_io_error',
+                                        {'stage': 'write', 'errno': 32})
+        endpoint.call.side_effect = EndpointError('Session is now unavailable', 'endpoint_unavailable')
+        response = broker.execute({'operation': 'health'})
+        self.assertFalse(response['ready'])
+        self.assertEqual(response['transport_failure']['code'], 'endpoint_io_error')
+        endpoint.call.assert_not_called()
+
+    def test_malformed_diagnostic_values_cannot_disrupt_an_unhealthy_reply(self):
+        error = EndpointError('private input', ['private-code'],
+                              {'operation': ['private-operation'], 'errno': True, 'stage': {}})
+        self.assertEqual(transport_details(error), {'code': 'endpoint_error'})
+
+    def test_reset_transport_details_remain_available_during_recovery(self):
+        broker, endpoint = self.broker()
+        broker.sessions = {SESSION_BASE + 1: 97}
+        endpoint.call.side_effect = EndpointError('Closed stream', 'endpoint_eof', {'exit_code': 255})
+        result = broker.reset_owned_sessions()
+        self.assertEqual(result['transport_failure'], {'code': 'endpoint_eof', 'exit_code': 255})
+        self.assertEqual(broker.execute({'operation': 'health'})['transport_failure'], result['transport_failure'])
+        self.assertEqual(broker.sessions, {SESSION_BASE + 1: 97})
 
     def test_malformed_reset_status_requires_recovery_and_preserves_handle(self):
         broker, endpoint = self.broker()

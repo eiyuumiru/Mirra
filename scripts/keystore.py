@@ -3,7 +3,7 @@ import base64
 import re
 import time
 
-from transport import EndpointError
+from transport import EndpointError, transport_details
 from wire import platform_ltk
 
 SESSION_BASE = 0x6F000000
@@ -83,6 +83,7 @@ class AksBroker:
         self.counter = 0
         self.wire_keys = {}
         self.failure = None
+        self.transport_failure = None
 
     def reset_owned_sessions(self):
         # One client request, one overall endpoint timeout, at most 16 actual
@@ -93,10 +94,12 @@ class AksBroker:
         for virtual, real in list(self.sessions.items()):
             try:
                 response = self.endpoint.call('reset', session=real, data='', _deadline=deadline)
-            except EndpointError:
+            except EndpointError as error:
                 self.failure = self.failure or 'owned_session_reset_transport_failed'
+                self.transport_failure = self.transport_failure or transport_details(error)
                 return {'status': UNAVAIWORKSPACELE, 'error': 'owned_session_reset_transport_failed',
-                        'reset_count': count, 'remaining_sessions': len(self.sessions)}
+                        'reset_count': count, 'remaining_sessions': len(self.sessions),
+                        'transport_failure': self.transport_failure}
             status = response.get('status', UNAVAIWORKSPACELE)
             if type(status) is not int:
                 status = UNAVAIWORKSPACELE
@@ -112,8 +115,15 @@ class AksBroker:
     def execute(self, request):
         operation = request.get('operation')
         if operation == 'health':
-            if self.endpoint.process.poll() is not None:
+            first_error = getattr(self.endpoint, 'failure', None)
+            if isinstance(first_error, EndpointError):
+                self.failure = self.failure or 'endpoint_transport_failed'
+                self.transport_failure = self.transport_failure or transport_details(first_error)
+            exit_code = self.endpoint.process.poll()
+            if exit_code is not None:
                 self.failure = self.failure or 'endpoint_exited'
+                self.transport_failure = self.transport_failure or {
+                    'code': 'endpoint_process_exited', 'exit_code': exit_code}
             alive = self.failure is None
             if alive and self.classes:
                 identity = next(iter(self.classes.values()))['identity']
@@ -121,15 +131,18 @@ class AksBroker:
                     status = self.endpoint.call('validate', identity=identity).get('status')
                     if type(status) is not int or status != 0:
                         self.failure = 'identity_validation_failed'
-                except EndpointError:
+                except EndpointError as error:
                     # The transport has abandoned this command stream. Report a
                     # confirmed failure, instead of dropping the health reply.
                     self.failure = 'endpoint_transport_failed'
+                    self.transport_failure = transport_details(error)
                 alive = self.failure is None
             response = {'ready': alive, 'identities': len(self.identities), 'sessions': len(self.sessions),
                         'capabilities': ['reset_owned_sessions']}
             if self.failure:
                 response['error'] = self.failure
+            if self.transport_failure:
+                response['transport_failure'] = self.transport_failure
             return response
         if operation == 'reset_owned_sessions':
             return self.reset_owned_sessions()

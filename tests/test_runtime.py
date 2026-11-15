@@ -1,4 +1,5 @@
 import importlib.util
+import errno
 import json
 from pathlib import Path
 import shlex
@@ -212,11 +213,16 @@ print('{"ready":true}',flush=True)
 sys.stdin.readline(); sys.stdout.write('{"status":');sys.stdout.flush();time.sleep(30)
 ''')
         started = time.monotonic()
-        with self.assertRaisesRegex(EndpointError,'timed out'):
+        with self.assertRaisesRegex(EndpointError,'timed out') as caught:
             e.call('generate')
+        self.assertEqual(caught.exception.code, 'endpoint_reply_timeout')
+        self.assertEqual(caught.exception.details['reply_bytes'], len(b'{"status":'))
+        self.assertEqual(caught.exception.details['operation'], 'generate')
+        self.assertIs(e.failure, caught.exception)
         self.assertLess(time.monotonic()-started,2)
         with self.assertRaisesRegex(EndpointError,'unavailable'):
             e.call('validate')
+        self.assertIs(e.failure, caught.exception)
         e.close()
         self.assertIsNotNone(e.process.poll())
 
@@ -228,9 +234,56 @@ sys.stdin.readline(); sys.stdout.write('{"status":');sys.stdout.flush();time.sle
                 if len(reply)>MAX_REPLY:
                     program="import sys,time; print('{\"ready\":true}',flush=True); sys.stdin.readline(); print('x'*262145,flush=True); time.sleep(30)"
                 e = self.endpoint(program)
-                with self.assertRaises(EndpointError):e.call('validate')
+                with self.assertRaises(EndpointError) as caught:e.call('validate')
+                expected = 'endpoint_reply_too_large' if len(reply)>MAX_REPLY else 'endpoint_invalid_reply'
+                self.assertEqual(caught.exception.code, expected)
                 e.close()
                 self.assertIsNotNone(e.process.poll())
+
+    def test_eof_and_an_already_exited_process_have_distinct_errors(self):
+        e = self.endpoint('''import os,sys,time
+print('{"ready":true}',flush=True)
+sys.stdin.readline();os.close(1);time.sleep(30)
+''')
+        with self.assertRaises(EndpointError) as caught:
+            e.call('validate')
+        self.assertEqual(caught.exception.code, 'endpoint_eof')
+        self.assertNotIn('exit_code', caught.exception.details)
+        e.close()
+        exited = self.endpoint('print(\'{"ready":true}\',flush=True);raise SystemExit(23)')
+        exited.process.wait(timeout=2)
+        with self.assertRaises(EndpointError) as caught:
+            exited.call('validate')
+        self.assertEqual(caught.exception.code, 'endpoint_process_exited')
+        self.assertEqual(caught.exception.details['exit_code'], 23)
+
+    def test_a_full_input_pipe_reports_a_write_timeout(self):
+        e = self.endpoint('import time;print(\'{"ready":true}\',flush=True);time.sleep(30)')
+        with self.assertRaises(EndpointError) as caught:
+            e.call('setup', data='x' * (MAX_REPLY - 256))
+        self.assertEqual(caught.exception.code, 'endpoint_write_timeout')
+        self.assertLess(caught.exception.details['written_bytes'], caught.exception.details['request_bytes'])
+        self.assertNotIn('x' * 32, json.dumps(caught.exception.details))
+
+    def test_io_errors_keep_errno_and_abandon_the_stream(self):
+        e = self.endpoint('import time;print(\'{"ready":true}\',flush=True);time.sleep(30)')
+        with patch('transport.os.write', side_effect=OSError(errno.EPIPE, 'private input')), \
+                self.assertRaises(EndpointError) as caught:
+            e.call('validate')
+        self.assertEqual(caught.exception.code, 'endpoint_io_error')
+        self.assertEqual(caught.exception.details['errno'], errno.EPIPE)
+        self.assertEqual(caught.exception.details['stage'], 'write')
+        self.assertNotIn('private input', json.dumps(caught.exception.details))
+        with self.assertRaisesRegex(EndpointError, 'unavailable'):
+            e.call('validate')
+
+    def test_wrapping_keeps_existing_error_code_and_details(self):
+        e = self.endpoint('import time;print(\'{"ready":true}\',flush=True);time.sleep(30)')
+        error = EndpointError('Known failure', 'known_failure', {'stage': 'known_stage'})
+        with patch.object(e, 'read', side_effect=error), self.assertRaises(EndpointError) as caught:
+            e.call('validate')
+        self.assertEqual(caught.exception.code, error.code)
+        self.assertEqual(caught.exception.details['stage'], 'known_stage')
 
     def test_failed_start_reaps_child(self):
         children=[]
