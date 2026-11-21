@@ -28,12 +28,20 @@ def inspect_host(config):
         add('app_build',supported_apple_app(info),f'Installed {version[0]} ({version[1]}); requires Apple’s 1.x system app and matching framework interfaces')
     except (OSError,ValueError,plistlib.InvalidFileException):
         add('app_build',False,'System iPhone Mirroring app is unavailable')
-    for name,path in [('ssh_account',config.user_file),('ssh_key',config.identity_file),
-                      ('ssh_host_key',config.known_hosts_file),('device_certificate',config.certificate_file)]:
+    for name,path in [('bridge_pairing_token',config.token_file),('device_certificate',config.certificate_file)]:
         try:
-            add(name,path.is_file() and path.stat().st_size>0,'Configured provisioning file is present' if path.is_file() else 'Import or provision device access')
+            add(name,path.is_file() and path.stat().st_size>0,'Configured provisioning file is present' if path.is_file() else 'Set up or pair the bridge')
         except OSError:
             add(name,False,'Configured provisioning file cannot be read')
+    # SSH is only needed to (re)install the bridge service, not to run it.
+    for name,path in [('ssh_account',config.user_file),('ssh_key',config.identity_file),
+                      ('ssh_host_key',config.known_hosts_file)]:
+        try:
+            present = path.is_file() and path.stat().st_size>0
+        except OSError:
+            present = False
+        checks.append({'check':name,'status':'pass' if present else 'optional',
+                       'detail':'SSH setup access is present' if present else 'Only needed to reinstall the bridge service'})
     for name in ['keystore.dylib','media.dylib',
                  'sockets.dylib','launch.dylib']:
         add(name,(ROOT/'build'/name).is_file(),
@@ -63,7 +71,7 @@ def inspect_backend(config):
     try:
         with Endpoint(config) as endpoint:
             if not endpoint.ready.get('dcrt_bytes'):
-                raise RuntimeError('The device endpoint has no certificate')
+                raise RuntimeError('The bridge service has no certificate')
             wire = verify_attested_key(endpoint)
             certificate_match = endpoint.certificate_binding_verified
             # Public capabilities only: no host, serial, certificate or key.
@@ -85,7 +93,7 @@ def main():
     parser.add_argument('--json',action='store_true')
     parser.add_argument('--devices',action='store_true',help='List USB devices without changing them')
     parser.add_argument('--show-identifiers',action='store_true',help='Include USB serials for local configuration; omit from public reports')
-    parser.add_argument('--backend',action='store_true',help='Open configured SSH endpoint and create/validate one disposable signing key')
+    parser.add_argument('--backend',action='store_true',help='Open a bridge service session and create/validate one disposable signing key')
     parser.add_argument('--hardware',action='store_true',help='Read optional graphics, Wi-Fi/controller bindings, Bluetooth, loaded drivers, AWDL/llw and SIP observations; does not change readiness')
     args = parser.parse_args()
     try:
@@ -132,7 +140,7 @@ def main():
                 print(f'{observation["status"].upper():8} {name}: '
                       + json.dumps(observation, separators=(',', ':')))
         print('These checks do not verify a complete Mirroring session or daily-use stability.')
-    return 0 if all(c['status']=='pass' for c in checks) else 1
+    return 0 if all(c['status'] in ('pass','optional') for c in checks) else 1
 
 
 if __name__=='__main__':

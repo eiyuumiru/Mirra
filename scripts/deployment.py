@@ -20,6 +20,21 @@ def compiler_flags(sdk=None):
             '-Werror=unguarded-availability-new']
 
 
+def swift_flags(sdk=None):
+    _, target, _, sdk, _ = compiler_flags(sdk)
+    return ['-target', target, '-sdk', sdk]
+
+
+def build_rust(source, output, sdk=None):
+    _, _, _, sdk, _ = compiler_flags(sdk)
+    env = {**os.environ, 'SDKROOT': sdk, 'MACOSX_DEPLOYMENT_TARGET': MINIMUM_MACOS}
+    # This compiler runs inside the Python recipe without make's jobserver descriptors.
+    env.pop('MAKEFLAGS', None)
+    env.pop('MFLAGS', None)
+    subprocess.run(['rustc', '--edition=2021', '--target', ARCHITECTURE + '-apple-darwin',
+                    '-D', 'warnings', '-O', str(source), '-o', str(output)], env=env, check=True)
+
+
 def version(value):
     return tuple(int(part) for part in value.split('.')) + (0,) * (3 - len(value.split('.')))
 
@@ -50,15 +65,18 @@ def verify_app(app):
         raise ValueError('App minimum macOS differs from the compiled target')
     endpoint = app / 'Contents/Resources/Support/build/endpoint'
     require_ios_endpoint(endpoint)
+    settings = app / 'Contents/Resources/Support/build/settings'
+    require_ios_endpoint(settings, filetype=8)
     binaries = {}
     for path in sorted(app.rglob('*')):
-        if not path.is_file() or path == endpoint:
+        if not path.is_file() or path in (endpoint, settings):
             continue
         with path.open('rb') as stream:
             magic = stream.read(4)
         if magic in MAGICS:
             binaries[str(path.relative_to(app))] = verify_macos_binary(path)
     required = {'Contents/MacOS/Mirra', 'Contents/MacOS/password',
+                'Contents/Resources/Support/build/mirra-cli',
                 'Contents/Resources/Support/python/bin/python3'}
     if not required.issubset(binaries):
         raise ValueError('App is missing a required native executable')
@@ -70,6 +88,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--sdk')
     parser.add_argument('--flags', action='store_true')
+    parser.add_argument('--swift-flags', action='store_true')
+    parser.add_argument('--build-rust', nargs=2, metavar=('SOURCE', 'OUTPUT'))
     parser.add_argument('--stamp', type=Path)
     parser.add_argument('--app', type=Path)
     args = parser.parse_args()
@@ -81,6 +101,10 @@ def main():
             args.stamp.write_text(contents)
     elif args.flags:
         print(shlex.join(compiler_flags(args.sdk)))
+    elif args.swift_flags:
+        print(shlex.join(swift_flags(args.sdk)))
+    elif args.build_rust:
+        build_rust(*args.build_rust, sdk=args.sdk)
     else:
         parser.error('Choose --flags, --stamp or --app')
 

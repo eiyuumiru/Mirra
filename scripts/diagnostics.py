@@ -254,7 +254,8 @@ def collect(base=None, cursor=None):
             return {}
 
     try:
-        files = [('logs/setup.log', 'Setup'), ('logs/control.log', 'Service'), ('logs/service.log', 'Service')]
+        files = [('logs/setup.log', 'Setup'), ('logs/control.log', 'Service'), ('logs/service.log', 'Service'),
+                 ('logs/sharingd.log', 'Keys')]
         try:
             today = date.today()
             for name in reader.names('logs', r'(?:setup|control)-\d{4}-\d{2}-\d{2}\.log', limit=2 * RETENTION_DAYS):

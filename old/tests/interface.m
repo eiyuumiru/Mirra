@@ -1,6 +1,6 @@
 // Exercise actual native buttons with service/launch effects replaced by a recorder.
 #define main mirra_application_main
-#import "../src/app/app.m"
+#import "../app/app.m"
 #undef main
 
 @interface Wizard (Checks)

@@ -1,0 +1,20 @@
+[package]
+name = "mirra-native"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+libc.workspace = true
+regex.workspace = true
+sha2.workspace = true
+base64.workspace = true
+chrono.workspace = true
+mirra-core.workspace = true
+mirra-bridge.workspace = true
+mirra-keystore.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

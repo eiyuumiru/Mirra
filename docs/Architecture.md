@@ -4,7 +4,10 @@
 
 | Directory | Responsibility |
 | --- | --- |
-| `src/app/` | AppKit interface, controls, artwork, setup and secure password entry |
+| `src/app/` | SwiftUI interface, native app window, and setup and service controls |
+| `src/app-support/` | App artwork and secure SSH password helper |
+| `src/cli/` | Rust entry point used by the app and the login service |
+| `old/app/` | Previous Objective-C interface archived for reference |
 | `src/mirroring/` | Media, keystore, launch, socket and decoder adapters |
 | `src/phone/` | Bridge endpoint for AppleKeyStore and Secure Enclave operations |
 | `src/tools/` | Host compatibility and capability inspection |

@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Forward a loopback TCP port to the configured USB backend."""
+"""Forward a loopback TCP port to the USB bridge's SSH port (setup only).
+
+At runtime Mirra reaches the bridge service through usbmux directly."""
 import argparse
 from dataclasses import replace
 import signal

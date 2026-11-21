@@ -10,6 +10,7 @@ import tempfile
 import threading
 import time
 import unittest
+import unittest.mock
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
@@ -47,6 +48,51 @@ class MirroringStartupTests(unittest.TestCase):
                         wait_for_mirroring_exit(threading.Event(), state)
                 self.assertEqual(state.read_bytes(), before)
 
+    def test_wait_quits_an_open_app_once_and_continues(self):
+        with tempfile.TemporaryDirectory() as folder:
+            state = Path(folder) / 'state.json'
+            write_state(state, {'phase': 'startup_checks', 'supervisor_birth': [42]})
+            open_app = [True]
+            quit_calls = []
+            def quit_app():
+                quit_calls.append(1)
+                open_app[0] = False
+            with patch('startup.process_birth', return_value=(42,)), \
+                    patch('startup.mirroring_running', side_effect=lambda: open_app[0]):
+                self.assertTrue(wait_for_mirroring_exit(threading.Event(), state, quit_app))
+            self.assertEqual(quit_calls, [1])
+            self.assertEqual(json.loads(state.read_text())['phase'], 'startup_checks')
+
+    def test_failed_quit_falls_back_to_waiting_for_the_user(self):
+        with tempfile.TemporaryDirectory() as folder:
+            state = Path(folder) / 'state.json'
+            write_state(state, {'phase': 'startup_checks', 'supervisor_birth': [42]})
+            checks = iter([True, True, False])
+            quit_app = unittest.mock.Mock(side_effect=OSError('denied'))
+            with patch('startup.process_birth', return_value=(42,)), \
+                    patch('startup.mirroring_running', side_effect=lambda: next(checks)):
+                self.assertTrue(wait_for_mirroring_exit(threading.Event(), state, quit_app))
+            quit_app.assert_called_once()
+
+    def test_quit_mirroring_signals_only_verified_apps(self):
+        import startup
+        alive = {101: True}
+        listing = unittest.mock.Mock(returncode=0, stdout='101 202\n')
+        identity = lambda pid: (pid, 1, 2) if pid == 101 and alive[101] else None
+        def kill(pid, sig):
+            self.assertEqual(pid, 101)
+            alive[101] = False
+        with patch('startup.subprocess.run', return_value=listing), \
+                patch('startup.NativeAppObserver.identity', side_effect=identity), \
+                patch('startup.os.kill', side_effect=kill) as signal_app:
+            self.assertTrue(startup.quit_mirroring(term_seconds=1, kill_seconds=1))
+        signal_app.assert_called_once()
+        with patch('startup.subprocess.run', return_value=listing), \
+                patch('startup.NativeAppObserver.identity', return_value=None), \
+                patch('startup.os.kill') as signal_app:
+            self.assertFalse(startup.quit_mirroring())
+        signal_app.assert_not_called()
+
     def test_native_recovers_abandoned_apps_before_waiting_or_preparing(self):
         import native
         from configuration import load_config
@@ -60,24 +106,30 @@ class MirroringStartupTests(unittest.TestCase):
             for continued in (False, True):
                 with patch('native.load_config', return_value=config), \
                         patch('native.Path.read_bytes', return_value=b'fixture'), \
+                        patch('native.Path.is_file', return_value=True), \
                         patch('native.plistlib.loads', return_value={}), \
+                        patch('native.supported_apple_app', return_value=True), \
+                        patch('native.subprocess.run'), \
+                        patch('native.require_media_profile', return_value={}) as verify, \
                         patch('native.wait_for_mirroring_exit') as wait, \
                         patch('native.NativeLaunchAgent.recover_abandoned', return_value=[]) as recover, \
                         patch('native.require_container') as container:
                     parser = argparse.ArgumentParser()
                     def after_recovery(*_):
                         recover.assert_called_once()
+                        verify.assert_called_once()
                         return continued
                     wait.side_effect = after_recovery
                     if continued:
-                        with patch.object(parser, 'error', side_effect=RuntimeError('validation reached')):
-                            with self.assertRaisesRegex(RuntimeError, 'validation reached'):
-                                native.run_session(parser, args, threading.Event())
+                        container.side_effect = RuntimeError('container reached')
+                        with self.assertRaisesRegex(RuntimeError, 'container reached'):
+                            native.run_session(parser, args, threading.Event())
+                        container.assert_called_once()
                     else:
                         self.assertEqual(native.run_session(parser, args, threading.Event()), 0)
+                        container.assert_not_called()
                     recover.assert_called_once()
                     wait.assert_called_once()
-                    container.assert_not_called()
 
     def test_plain_cli_keeps_existing_open_app_guard(self):
         import native

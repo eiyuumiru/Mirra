@@ -6,9 +6,12 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import signal
+import struct
 import subprocess
 import sys
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -17,12 +20,14 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
 from keystore import AksBroker, MAX_SESSIONS, verify_attested_key
 from transport import Endpoint, EndpointError
+from bridgeclient import BridgeClosed, BridgeError, WebSocket, request, request_json
 from wire import wrap
 
 BINARY = ROOT / 'build/endpoint-protocol'
 SCENARIOS = []
 PROFILE = {'MODEL': 'iPhone11,2', 'IOS': '17.2', 'BUILD': '21C62'}
 REMOTE = base64.b64encode(b'SYNTHETIC-REMOTE-KEY').decode()
+TOKEN = 'K7QM-2XRA-9DFT-HW3N-PC6E-ZZ8B'
 SYMBOLS = ('aks_create_bag', 'aks_unload_bag', 'aks_create_signing_key',
     'aks_create_signing_key_with_params', 'aks_sign_signing_key', 'aks_params_create',
     'aks_params_set_data', 'aks_params_set_number', 'aks_params_get_der',
@@ -57,11 +62,32 @@ class EndpointProtocolTests(unittest.TestCase):
                         run.stats.update(json.loads(stats.read_text()))
 
     @contextmanager
+    def service(self, run, *, certificate=True, token=TOKEN):
+        """Run the real bridge service on a loopback port with synthetic native APIs."""
+        directory = run.directory / 'service'
+        directory.mkdir(mode=0o700)
+        if certificate:
+            (directory / 'certificate.der').write_bytes(run.certificate.read_bytes())
+        (directory / 'token').write_text(TOKEN + '\n')
+        process = subprocess.Popen([str(BINARY), '--serve', str(directory), '--port', '0'], env=run.env,
+                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        try:
+            started = json.loads(process.stdout.readline())
+            self.assertTrue(started['listening'], started)
+            run.service_directory = directory
+            run.config = SimpleNamespace(transport='ssh', ssh_host='127.0.0.1', service_port=started['port'],
+                                         timeout=3, certificate_file=run.certificate, token_file=directory / 'token')
+            run.token = token
+            yield run
+        finally:
+            process.send_signal(signal.SIGTERM)
+            self.assertEqual(process.wait(timeout=5), 0)
+            process.stdout.close()
+
+    @contextmanager
     def endpoint(self, **settings):
-        with self.native(**settings) as run:
-            with Endpoint(SimpleNamespace(timeout=3, certificate_file=run.certificate),
-                    command=[str(BINARY), str(run.certificate)],
-                    expected_certificate_sha256=hashlib.sha256(run.certificate.read_bytes()).hexdigest()) as endpoint:
+        with self.native(**settings) as run, self.service(run):
+            with Endpoint(run.config, expected_certificate_sha256=hashlib.sha256(run.certificate.read_bytes()).hexdigest()) as endpoint:
                 for field, setting in (('product_type', 'MODEL'), ('os_version', 'IOS'), ('os_build', 'BUILD')):
                     self.assertEqual(endpoint.ready[field], str(settings.get(setting, PROFILE[setting])))
                 run.endpoint = endpoint
@@ -291,20 +317,124 @@ class EndpointProtocolTests(unittest.TestCase):
     def test_protocol_framing_and_oversized_request_cleanup(self):
         with self.endpoint() as run:
             session = self.session(run.endpoint, self.generate(run.endpoint))['session']
-            # Endpoint.call leaves the pipe nonblocking. Raw framing fixtures
-            # must send the complete line rather than silently accepting a
-            # partial write with no newline.
-            os.set_blocking(run.endpoint.process.stdin.fileno(), True)
-            for raw in (b'not-json\n', b'[]\n', b'null\n', b'"string"\n', b'{"operation":\xff}\n'):
-                run.endpoint.process.stdin.write(raw)
+            for raw in (b'not-json', b'[]', b'null', b'"string"', b'{"operation":\xff}'):
+                run.endpoint.socket.send_text(raw, time.monotonic() + 3)
                 self.assertEqual(run.endpoint.read()['error'], 'invalid_json')
                 self.record('invalid_json:' + raw.hex())
-            run.endpoint.process.stdin.write(b'x' * 262144 + b'\n')
+            # Announce an oversized frame without sending its payload, so the
+            # service's reply is not lost to a reset from unread input.
+            run.endpoint.socket.stream.sendall(struct.pack('!BBQ', 0x81, 0xff, 262145) + bytes(4))
             self.assertEqual(run.endpoint.read()['error'], 'request_too_large')
-            self.assertEqual(run.endpoint.process.wait(timeout=3), 0)
+            with self.assertRaises(BridgeClosed):
+                run.endpoint.socket.receive(time.monotonic() + 3)
+            self.assertEqual(run.endpoint.poll(), 0)
         self.assertEqual(run.stats['resets'], [session])
         self.assertEqual(len(run.stats['unloads']), 1)
         self.record('oversized_request_releases_owned_state')
+
+    def test_dropped_connection_releases_owned_state(self):
+        with self.native() as run, self.service(run):
+            with Endpoint(run.config, expected_certificate_sha256=hashlib.sha256(run.certificate.read_bytes()).hexdigest()) as endpoint:
+                session = self.session(endpoint, self.generate(endpoint))['session']
+                endpoint.socket.stream.close()  # No exit request: the Mac vanished.
+                endpoint._failed = True
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline:
+                    status, report = request_json(run.config, TOKEN, 'GET', '/v1/status', timeout=3)
+                    if report['active_sessions'] == 0:
+                        break
+                    time.sleep(.05)
+                self.assertEqual(report['active_sessions'], 0)
+        self.assertEqual(run.stats['resets'], [session])
+        self.assertEqual(len(run.stats['unloads']), 1)
+        self.record('dropped_connection_releases_owned_state')
+
+    def test_wrong_token_cannot_complete_the_handshake(self):
+        with self.native() as run, self.service(run):
+            for token in ('0000-0000-0000-0000-0000-0000', TOKEN[:-1] + 'C'):
+                with self.subTest(token=token), self.assertRaises(BridgeError) as caught:
+                    request(run.config, token, 'GET', '/v1/status', timeout=3)
+                self.assertEqual(caught.exception.code, 'bridge_token_rejected')
+            with self.assertRaises(EndpointError) as caught:
+                Endpoint(run.config, token='0000-0000-0000-0000-0000-0000',
+                         expected_certificate_sha256=hashlib.sha256(run.certificate.read_bytes()).hexdigest())
+            self.assertEqual(caught.exception.code, 'bridge_token_rejected')
+        self.assertEqual(run.stats['calls'], {})
+        self.record('wrong_token_rejected')
+
+    def test_http_routes_status_certificate_and_errors(self):
+        with self.native() as run, self.service(run, certificate=False):
+            status, report = request_json(run.config, TOKEN, 'GET', '/v1/status')
+            self.assertEqual((status, report['service'], report['certificate_available']), (200, 'mirra-bridge', False))
+            self.assertEqual(report['protocol_version'], 2)
+            self.assertEqual(request(run.config, TOKEN, 'GET', '/v1/certificate')[0], 404)
+            with self.assertRaises(EndpointError) as caught:
+                Endpoint(run.config, expected_certificate_sha256='0' * 64)
+            self.assertEqual(caught.exception.code, 'device_certificate_unavailable')
+            for issue in (False, True):
+                status, exported = request_json(run.config, TOKEN, 'POST', '/v1/certificate', {'issue': issue})
+                self.assertEqual(status, 200, exported)
+                self.assertEqual(exported['issuance_requested'], issue)
+                status, _, data = request(run.config, TOKEN, 'GET', '/v1/certificate')
+                self.assertEqual((status, hashlib.sha256(data).hexdigest()), (200, exported['sha256']))
+                certificate = run.service_directory / 'certificate.der'
+                self.assertEqual(certificate.read_bytes(), data)
+                self.assertEqual(certificate.stat().st_mode & 0o777, 0o600)
+            self.assertTrue(request_json(run.config, TOKEN, 'GET', '/v1/status')[1]['certificate_available'])
+            self.assertEqual(request_json(run.config, TOKEN, 'POST', '/v1/certificate', {'issue': 'yes'})[0], 400)
+            self.assertEqual(request_json(run.config, TOKEN, 'GET', '/v1/unknown')[0], 404)
+            self.assertEqual(request_json(run.config, TOKEN, 'DELETE', '/v1/status')[0], 405)
+            self.assertEqual(request_json(run.config, TOKEN, 'GET', '/v1/session')[0], 400)
+        self.assertFalse(run.stats['real_issuer_contacted'])
+        self.record('http_routes')
+
+    def test_http_certificate_failure_keeps_existing_certificate(self):
+        with self.native(FAIL='MAECopyDCRTWithError') as run, self.service(run):
+            status, reply = request_json(run.config, TOKEN, 'POST', '/v1/certificate', {'issue': False})
+            self.assertEqual((status, reply['error']), (409, 'cached_certificate_unavailable'))
+            self.assertEqual((run.service_directory / 'certificate.der').read_bytes(), b'SYNTHETIC-CERTIFICATE')
+        self.record('http_certificate_failure_preserves_certificate')
+
+    def test_certificate_renewal_rechecks_the_cache_without_reissuing(self):
+        original = bytes(1024)
+        fingerprint = hashlib.sha256(original).hexdigest()
+        request_body = {'issue': True, 'replace_expired_sha256': fingerprint}
+        for changes, expected in ((0, 409), (1, 200)):
+            with self.subTest(changes=changes), self.native(CERT_CHANGES_AFTER=changes) as run, self.service(run):
+                certificate = run.service_directory / 'certificate.der'
+                certificate.write_bytes(original)
+                status, reply = request_json(run.config, TOKEN, 'POST', '/v1/certificate', request_body)
+                self.assertEqual(status, expected, reply)
+                if changes:
+                    self.assertNotEqual(certificate.read_bytes(), original)
+                    self.assertEqual(reply['sha256'], hashlib.sha256(certificate.read_bytes()).hexdigest())
+                    self.assertFalse(request_json(run.config, TOKEN, 'POST', '/v1/certificate', request_body)[1]['issuance_requested'])
+                else:
+                    self.assertEqual(reply['error'], 'certificate_unchanged')
+                    self.assertEqual(certificate.read_bytes(), original)
+            self.assertEqual(run.stats['calls']['MAECopyDCRTWithError'], 2)
+            self.assertEqual(run.stats['calls']['MAEIssueDCRTWithCallback'], 1)
+        self.record('certificate_renewal_rechecks_cache_and_never_reissues_within_request')
+
+    def test_session_limit_and_missing_keystore(self):
+        with self.native() as run, self.service(run):
+            digest = hashlib.sha256(run.certificate.read_bytes()).hexdigest()
+            sessions = [Endpoint(run.config, expected_certificate_sha256=digest) for _ in range(4)]
+            try:
+                with self.assertRaises(EndpointError) as caught:
+                    Endpoint(run.config, expected_certificate_sha256=digest)
+                self.assertEqual(caught.exception.code, 'bridge_session_limit')
+            finally:
+                for endpoint in sessions:
+                    endpoint.close()
+        with self.native(MISSING='aks_create_bag') as run, self.service(run):
+            status, report = request_json(run.config, TOKEN, 'GET', '/v1/status')
+            self.assertEqual((status, report['required_symbols_available']), (200, False))
+            with self.assertRaises(EndpointError) as caught:
+                Endpoint(run.config, expected_certificate_sha256=hashlib.sha256(run.certificate.read_bytes()).hexdigest())
+            self.assertEqual(caught.exception.code, 'required_keystore_symbols_unavailable')
+            self.assertEqual(request_json(run.config, TOKEN, 'POST', '/v1/certificate', {})[0], 409)
+        self.record('session_limit_and_missing_keystore')
 
     def test_certificate_paths_apis_sizes_and_virtual_callback_deadline(self):
         cases = (
@@ -365,7 +495,7 @@ def main():
         'firmware_emulated': False,
         'suite_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         'source_sha256': {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest()
-            for name in ('tests/endpoint-protocol.m', 'scripts/transport.py',
+            for name in ('tests/endpoint-protocol.m', 'scripts/transport.py', 'scripts/bridgeclient.py',
                          'scripts/keystore.py', 'scripts/wire.py',
                          'src/phone/keystore-symbols.h', 'src/phone/cache-symbols.h')},
         'binary_sha256': hashlib.sha256(BINARY.read_bytes()).hexdigest(),

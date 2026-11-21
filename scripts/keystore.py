@@ -12,6 +12,7 @@ MAX_SESSIONS = 16  # The endpoint's isolated-session limit.
 MAX_RESET_SECONDS = 10  # Leave room inside the shim's 15-second socket timeout.
 NO_MEMORY = -536870211  # kIOReturnNoMemory (0xe00002bd)
 UNAVAIWORKSPACELE = -536870212  # kIOReturnError (0xe00002bc)
+UNLOCK_SESSION_KINDS = (2, 8, 12)  # Low flag bits of unlock sessions; others pair.
 
 
 def bridge_capabilities(report):
@@ -75,15 +76,55 @@ def verify_attested_key(endpoint):
 
 class AksBroker:
     """Calls are serialized by the socket server, including health and cleanup."""
-    def __init__(self, endpoint):
+    def __init__(self, endpoint, *, certificate_expires_at=None):
         self.endpoint = endpoint
+        self.certificate_expires_at = certificate_expires_at
+        self.can_resume_pairing = False
         self.identities = {}
         self.classes = {}
         self.sessions = {}
+        self.session_flags = {}
         self.counter = 0
         self.wire_keys = {}
         self.failure = None
         self.transport_failure = None
+
+    def restore(self, *, minimum_created_at=None):
+        """Adopt the keys this Mac saved on the bridge.
+
+        sharingd keeps its iPhone Mirroring pairing with these keys, so
+        recognizing them again avoids pairing anew after a restart."""
+        if not self.endpoint.ready.get('client_saved') or not self.endpoint.ready.get('restored_identities'):
+            return 0
+        response = self.endpoint.call('identities')
+        entries = response.get('identities') if response.get('status') == 0 else None
+        if not isinstance(entries, list):
+            return 0
+        restored = 0
+        ordered = sorted((entry for entry in entries if isinstance(entry, dict)),
+                         key=lambda entry: entry.get('created') if type(entry.get('created')) is int else 0)
+        for entry in ordered:
+            if minimum_created_at is not None:
+                created = entry.get('created')
+                if type(created) is not int or created < minimum_created_at:
+                    continue
+            key_class = entry.get('key_class')
+            if type(key_class) is not int or key_class not in (9, 10, 11):
+                continue
+            record = {'status': 0, 'identity': entry.get('identity'), 'ltk': entry.get('ltk'), 'key_class': key_class}
+            if not valid_generated_key(record):
+                continue
+            try:
+                wire, _proof = platform_ltk(record['ltk'], 3)
+            except ValueError:
+                continue
+            # The newest key of each class answers later generate requests.
+            self.classes[key_class] = record
+            self.wire_keys[key_class] = wire
+            self.identities[wire] = record['identity']
+            self.identities[record['ltk']] = record['identity']
+            restored += 1
+        return restored
 
     def reset_owned_sessions(self):
         # One client request, one overall endpoint timeout, at most 16 actual
@@ -92,6 +133,11 @@ class AksBroker:
         first_error = 0
         count = 0
         for virtual, real in list(self.sessions.items()):
+            # A pairing session holds the iPhone's paired peer on the bridge;
+            # resetting it makes the iPhone ignore unlocks until it pairs again.
+            flags = self.session_flags.get(virtual)
+            if flags is not None and (flags & 0x3f) not in UNLOCK_SESSION_KINDS:
+                continue
             try:
                 response = self.endpoint.call('reset', session=real, data='', _deadline=deadline)
             except EndpointError as error:
@@ -103,8 +149,9 @@ class AksBroker:
             status = response.get('status', UNAVAIWORKSPACELE)
             if type(status) is not int:
                 status = UNAVAIWORKSPACELE
-            if status == 0:
+            if status == 0 or response.get('error') == 'session_not_owned':  # Already released by the bridge.
                 self.sessions.pop(virtual)
+                self.session_flags.pop(virtual, None)
                 count += 1
             elif not first_error:
                 first_error = status
@@ -114,16 +161,16 @@ class AksBroker:
 
     def execute(self, request):
         operation = request.get('operation')
+        if self.certificate_expires_at is not None and time.time() >= self.certificate_expires_at:
+            self.failure = 'bridge_certificate_expired'
         if operation == 'health':
             first_error = getattr(self.endpoint, 'failure', None)
             if isinstance(first_error, EndpointError):
                 self.failure = self.failure or 'endpoint_transport_failed'
                 self.transport_failure = self.transport_failure or transport_details(first_error)
-            exit_code = self.endpoint.process.poll()
-            if exit_code is not None:
-                self.failure = self.failure or 'endpoint_exited'
-                self.transport_failure = self.transport_failure or {
-                    'code': 'endpoint_process_exited', 'exit_code': exit_code}
+            if self.endpoint.poll() is not None:
+                self.failure = self.failure or 'endpoint_disconnected'
+                self.transport_failure = self.transport_failure or {'code': 'endpoint_disconnected'}
             alive = self.failure is None
             if alive and self.classes:
                 identity = next(iter(self.classes.values()))['identity']
@@ -138,7 +185,7 @@ class AksBroker:
                     self.transport_failure = transport_details(error)
                 alive = self.failure is None
             response = {'ready': alive, 'identities': len(self.identities), 'sessions': len(self.sessions),
-                        'capabilities': ['reset_owned_sessions']}
+                        'capabilities': ['reset_owned_sessions'], 'can_resume_pairing': self.can_resume_pairing}
             if self.failure:
                 response['error'] = self.failure
             if self.transport_failure:
@@ -196,6 +243,8 @@ class AksBroker:
                 self.counter += 1
                 virtual = SESSION_BASE + self.counter
                 self.sessions[virtual] = real
+                flags = request.get('flags', 0)
+                self.session_flags[virtual] = flags if type(flags) is int else 0
                 response['session'] = virtual
             return response
         if operation in {'step', 'token', 'confirm', 'setup', 'reset'}:
@@ -203,8 +252,9 @@ class AksBroker:
             if type(virtual) is not int or virtual not in self.sessions:
                 return {'error': 'session_not_owned'}
             response = self.endpoint.call(operation, session=self.sessions[virtual], data=request.get('data', ''))
-            if operation == 'reset' and response.get('status') == 0:
+            if operation == 'reset' and (response.get('status') == 0 or response.get('error') == 'session_not_owned'):
                 self.sessions.pop(virtual)
+                self.session_flags.pop(virtual, None)
             return response
         if operation in {'get_state', 'drop'}:
             return self.endpoint.call(operation, data=request.get('data', ''))

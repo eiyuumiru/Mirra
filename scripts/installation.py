@@ -27,10 +27,16 @@ LABEL = 'local.mirra.agent'
 ADAPTERS = ['keystore.dylib', 'media.dylib',
             'sockets.dylib', 'launch.dylib']
 HOST_TOOLS = ['inspector']
+CLI_NAME = 'mirra-cli'
+SUPPORT_TOOLS = HOST_TOOLS + [CLI_NAME]
 DECODER_ADAPTERS = ['decoder-route.dylib']
 PACKAGE_ADAPTERS = ADAPTERS + DECODER_ADAPTERS
 PACKAGE_SCHEMA = 5
-SUPPORT_REVISION = 27
+CLI_SUPPORT_REVISION = 40
+CERTIFICATE_LOCK_REVISION = 45
+BRIDGE_UPDATE_REVISION = 47
+SUPPORT_REVISION = 51
+BRIDGE_UPDATE_FILES = ('build/endpoint', 'config/endpoint.plist')
 
 
 class NativeService:
@@ -43,6 +49,34 @@ class NativeService:
         self.target = self.domain + '/' + LABEL
         self.log = self.base / 'logs/service.log'
         self.state = self.base / 'service.json'
+
+    def managed_app(self, manifest=None):
+        """Recognize the app-managed registration used only by support revision 41."""
+        if manifest is None:
+            path = self.package / 'manifest.json'
+            if not path.exists():
+                return None
+            self.private_file(path)
+            manifest = json.loads(path.read_text())
+        app = manifest.get('managed_app')
+        if app is None:
+            return None
+        path = Path(app)
+        if not path.is_absolute() or path.suffix != '.app':
+            raise RuntimeError('Invalid installed Mirra app path')
+        return path
+
+    def background_action(self, action, app=None):
+        app = app or self.managed_app()
+        if app is None:
+            raise RuntimeError('No Mirra app registered to manage background support')
+        helper = app / 'Contents/MacOS/Mirra'
+        reply = activity.run([str(helper), '--background-action', action], source='ServiceManagement',
+                             capture_output=True, text=True, timeout=15, check=True)
+        status = reply.stdout.strip()
+        if status not in ('enabled', 'requires_approval', 'not_registered', 'not_found'):
+            raise RuntimeError('Mirra did not return a background registration status')
+        return status
 
     def command(self, *args):
         return activity.run(['launchctl', *args], source='launchctl', capture_output=True, text=True, timeout=15)
@@ -58,25 +92,41 @@ class NativeService:
             key, separator, value = line.strip().partition(' = ')
             if separator and key in {'path', 'program', 'pid', 'state', 'last exit code'}:
                 values.setdefault(key, value)
-        if values.get('path') != str(self.plist):
+        path = values.get('path', '')
+        if path != str(self.plist) and not (
+                path.startswith('(submitted by smd.') and self.managed_app() is not None
+                and self.background_action('status') == 'enabled'):
             raise RuntimeError('The service label belongs to another configuration')
         return values
 
     def python(self):
         return str(self.package / 'python' / ENTRYPOINT)
 
-    def definition(self, config):
-        arguments = [self.python(), '-E', '-s', '-B', str(self.package / 'scripts/native.py'),
-            '--config', str(self.package / 'config.json'), '--launch-services',
-            '--recover-backend', '--until-stopped', '--service-log', str(self.log),
-            '--service-state', str(self.state)]
-        if config.transport == 'usb':
-            arguments.append('--manage-usb')
+    def definition(self, config, *, manifest=None):
+        revision = SUPPORT_REVISION if manifest is None else manifest.get('support_revision', 0)
+        if revision >= CLI_SUPPORT_REVISION:
+            arguments = [str(self.package / 'build' / CLI_NAME), 'run-service']
+        else:
+            # Match older installed plists exactly so updates can verify ownership.
+            arguments = [self.python(), '-E', '-s', '-B', str(self.package / 'scripts/native.py'),
+                '--config', str(self.package / 'config.json'), '--launch-services',
+                '--recover-backend', '--until-stopped', '--service-log', str(self.log),
+                '--service-state', str(self.state)]
         return {'Label': LABEL, 'ProgramArguments': arguments,
             'WorkingDirectory': str(self.package), 'RunAtLoad': True, 'KeepAlive': True,
             'LimitLoadToSessionType': 'Aqua', 'ThrottleInterval': 10, 'ExitTimeOut': 120,
             'ProcessType': 'Background', 'Umask': 0o077,
             'StandardOutPath': str(self.log), 'StandardErrorPath': str(self.log)}
+
+    def previous_definitions(self, config, manifest):
+        definitions = []
+        if manifest.get('support_revision', 0) < CLI_SUPPORT_REVISION:
+            legacy = self.definition(config, manifest=manifest)
+            legacy['ProgramArguments'].append('--manage-usb')
+            definitions.append(legacy)
+        if manifest.get('previous_definition'):
+            definitions.append(manifest['previous_definition'])
+        return definitions
 
     def validate_package(self):
         manifest = self.package / 'manifest.json'
@@ -93,6 +143,10 @@ class NativeService:
                 raise RuntimeError('Invalid Mirra support revision')
             if value['support_revision'] >= 20:
                 required.add('scripts/startup.py')
+            if value['support_revision'] >= CLI_SUPPORT_REVISION:
+                required.add('build/' + CLI_NAME)
+            if value['support_revision'] >= BRIDGE_UPDATE_REVISION:
+                required.update(BRIDGE_UPDATE_FILES)
         if not required.issubset(value['files']):
             raise RuntimeError('Native support package is missing required files')
         for name, digest in value['files'].items():
@@ -118,9 +172,10 @@ class NativeService:
             config = load_config(self.package / 'config.json')
             if self.plist.exists() or self.plist.is_symlink():
                 self.private_file(self.plist)
-                if plistlib.loads(self.plist.read_bytes()) != self.definition(config):
+                recognized = [self.definition(config, manifest=manifest), *self.previous_definitions(config, manifest)]
+                if plistlib.loads(self.plist.read_bytes()) not in recognized:
                     raise RuntimeError('Existing support definition differs; it was preserved')
-            elif self.registration():
+            elif not self.managed_app(manifest) and self.registration():
                 raise RuntimeError('Registered support has no verified login definition; it was preserved')
             with activity.operation('Service', 'stop support for update'):
                 self.stop()
@@ -158,7 +213,9 @@ class NativeService:
                 descriptor = decoder_route.acquire()
                 os.close(descriptor)
         with activity.operation('Service', 'recover previous sharing support'):
-            recovered = SharingdAgent.recover_abandoned()
+            # Cleanup could not be verified while stopping, so hand sharingd back
+            # to Apple (a detached adapter included) to complete verification.
+            recovered = SharingdAgent.recover_abandoned(restore_detached=True)
         if current.get('run'):
             self.record_cleanup_recovery(current, recovered)
 
@@ -214,7 +271,7 @@ class NativeService:
         for name in ('native.py', 'decoder.py', 'decoder_route.py', 'startup.py'):
             if not (self.source / 'scripts' / name).is_file():
                 raise RuntimeError('Updated support is incomplete; missing ' + name)
-        for name in PACKAGE_ADAPTERS + HOST_TOOLS:
+        for name in PACKAGE_ADAPTERS + SUPPORT_TOOLS:
             source = self.source / 'build' / name
             if not source.is_file():
                 raise RuntimeError('Build the native support adapters first; missing ' + name)
@@ -234,9 +291,23 @@ class NativeService:
             raise RuntimeError('Native support installation directory is not private')
         previous_definition = None
         if self.package.exists():
-            self.validate_package()
+            installed_manifest = self.validate_package()
             if not replace_package:
                 return {'package': str(self.package), 'already_prepared': True}
+            if self.registration():
+                raise RuntimeError('Stop the service before replacing its package')
+            # A new adapter, or a different bridge, needs Apple's sharingd back
+            # first. An update that ships the identical adapter keeps the detached
+            # one: a new sharingd process makes the iPhone ask for its passcode.
+            from sharingd import SharingdAgent
+            adapter = self.source / 'build' / 'keystore.dylib'
+            keep_sharingd = (config is None and adapter.is_file()
+                             and SharingdAgent.detached_matches(hashlib.sha256(adapter.read_bytes()).hexdigest()))
+            if keep_sharingd:
+                activity.emit('Service', 'kept detached sharingd for update; adapter unchanged')
+            else:
+                with activity.operation('Service', 'restore sharingd for update'):
+                    SharingdAgent.restore_detached()
             if self.registration():
                 raise RuntimeError('Stop the service before replacing its package')
             if self.state.exists():
@@ -244,10 +315,20 @@ class NativeService:
                 birth = json.loads(self.state.read_text())['supervisor_birth']
                 if process_birth(birth[0]) == tuple(birth):
                     raise RuntimeError('Wait for native support cleanup before replacing its package')
-            previous_definition = self.definition(load_config(self.package / 'config.json'))
+            old_config = load_config(self.package / 'config.json')
+            previous_definition = self.definition(old_config, manifest=installed_manifest)
+            if self.plist.exists() or self.plist.is_symlink():
+                self.private_file(self.plist)
+                existing = plistlib.loads(self.plist.read_bytes())
+                if existing in self.previous_definitions(old_config, installed_manifest):
+                    previous_definition = existing
             # Never move runtime paths referenced by pending recovery journals.
             for name in ('launch.json', 'sharing.json', 'decoder-route.json'):
                 journal = Path.home() / 'Library/Caches/Mirra' / name
+                # A kept detached sharingd only names its old directory; restoring
+                # it later tolerates that directory having moved with the package.
+                if name == 'sharing.json' and keep_sharingd:
+                    continue
                 if journal.exists():
                     raise RuntimeError('Finish native session cleanup before replacing the package')
         if config is None:
@@ -270,17 +351,28 @@ class NativeService:
         if not embedded.exists():
             raise RuntimeError('Build Mirra.app before installing its background service')
         files.extend(path.relative_to(staging) for path in copy_runtime(embedded, staging / 'python'))
-        for name in PACKAGE_ADAPTERS + HOST_TOOLS:
+        for name in PACKAGE_ADAPTERS + SUPPORT_TOOLS:
             target = staging / 'build' / name
             target.parent.mkdir(mode=0o700, exist_ok=True)
             shutil.copyfile(self.source / 'build' / name, target)
             target.chmod(0o700)
             files.append(target.relative_to(staging))
+        for name in BRIDGE_UPDATE_FILES:
+            target = staging / name
+            target.parent.mkdir(mode=0o700, exist_ok=True)
+            shutil.copyfile(self.source / name, target)
+            target.chmod(0o600)
+            files.append(target.relative_to(staging))
         paths = {}
-        for attribute, name in [('user_file', 'user'), ('identity_file', 'identity'),
-                                ('known_hosts_file', 'known_hosts'), ('certificate_file', 'certificate.der')]:
+        # The token and certificate are required at runtime. SSH access files
+        # are kept when present so a later setup can reuse the verified access.
+        for attribute, name, required in [('token_file', 'token', True), ('certificate_file', 'certificate.der', True),
+                                          ('user_file', 'user', False), ('identity_file', 'identity', False),
+                                          ('known_hosts_file', 'known_hosts', False)]:
             source = getattr(config, attribute)
             if not source.is_file() or not source.stat().st_size:
+                if not required:
+                    continue
                 raise RuntimeError('Backend provisioning is incomplete: ' + attribute)
             target = staging / 'private' / name
             target.parent.mkdir(mode=0o700, exist_ok=True)
@@ -317,7 +409,7 @@ class NativeService:
     def install(self):
         package = self.validate_package()
         config = load_config(self.package / 'config.json')
-        definition = self.definition(config)
+        definition = self.definition(config, manifest=package)
         previous = None
         backup = None
         if self.plist.exists() or self.plist.is_symlink():
@@ -325,25 +417,16 @@ class NativeService:
             previous = self.plist.read_bytes()
             old_definition = plistlib.loads(previous)
             if old_definition != definition:
-                other_transport = 'ssh' if config.transport == 'usb' else 'usb'
-                recognized = [self.definition(replace(config, transport=transport))
-                              for transport in (config.transport, other_transport)]
-                # prepare() records the exact previously recognized definition
-                # before replacing the package. This permits a stopped upgrade
-                # while preserving the owner's installed bridge configuration.
-                if package.get('previous_definition'):
-                    recognized.append(package['previous_definition'])
-                if old_definition not in recognized:
+                if old_definition not in self.previous_definitions(config, package):
                     raise RuntimeError('Existing service plist differs; inspect it before replacement')
-                # Only the known USB-forwarding flag may change. A registered
-                # job, or an unregistered supervisor still restoring, is live.
+                # A registered job, or a supervisor still restoring, is live.
                 if self.registration():
-                    raise RuntimeError('Stop the service before changing its transport')
+                    raise RuntimeError('Stop the service before changing its launch definition')
                 if self.state.exists():
                     self.private_file(self.state)
                     birth = json.loads(self.state.read_text())['supervisor_birth']
                     if process_birth(birth[0]) == tuple(birth):
-                        raise RuntimeError('Wait for native support cleanup before changing its transport')
+                        raise RuntimeError('Wait for native support cleanup before changing its launch definition')
                 descriptor, name = tempfile.mkstemp(prefix='service.previous.', suffix='.plist', dir=self.base)
                 backup = Path(name)
                 with os.fdopen(descriptor, 'wb') as stream:
@@ -380,9 +463,14 @@ class NativeService:
             temporary.unlink(missing_ok=True)
 
     def start(self):
-        self.validate_package()
+        manifest = self.validate_package()
         self.private_file(self.plist)
-        if plistlib.loads(self.plist.read_bytes()) != self.definition(load_config(self.package / 'config.json')):
+        config = load_config(self.package / 'config.json')
+        current = plistlib.loads(self.plist.read_bytes())
+        if current != self.definition(config, manifest=manifest):
+            if current in self.previous_definitions(config, manifest):
+                # Resume an upgrade interrupted between staging and writing the plist.
+                return self.install()
             raise RuntimeError('Service plist no longer matches the installed package')
         if not self.registration():
             reply = self.command('bootstrap', self.domain, str(self.plist))
@@ -399,9 +487,14 @@ class NativeService:
             if process_birth(saved[0]) == saved:
                 birth = saved
         if before:
-            reply = self.command('bootout', self.target)
-            if reply.returncode:
-                raise RuntimeError('Cannot stop native support: ' + reply.stderr.strip())
+            if before.get('path') == str(self.plist) or self.managed_app() is None:
+                reply = self.command('bootout', self.target)
+                if reply.returncode:
+                    raise RuntimeError('Cannot stop native support: ' + reply.stderr.strip())
+            else:
+                self.background_action('unregister')
+        elif self.managed_app() is not None:
+            self.background_action('unregister')
         deadline = time.monotonic() + 110
         while birth is not None and process_birth(birth[0]) == birth:
             if time.monotonic() > deadline:
@@ -414,16 +507,26 @@ class NativeService:
                 with backend_lease():
                     self.recover_pending()
             current = self.status()
-        current['login_enabled'] = self.plist.exists()
         if birth is not None and not current.get('last_cleanup_verified'):
             raise RuntimeError('Service process ended but native cleanup is not verified; restart support to recover before removing it')
         return current
 
     def remove(self):
+        if self.managed_app() is not None and not self.plist.exists():
+            self.stop()
+            from sharingd import SharingdAgent
+            SharingdAgent.restore_detached()
+            return {'login_enabled': False, 'package_preserved': str(self.package)}
         self.private_file(self.plist)
-        if plistlib.loads(self.plist.read_bytes()) != self.definition(load_config(self.package / 'config.json')):
+        manifest = self.validate_package()
+        config = load_config(self.package / 'config.json')
+        recognized = [self.definition(config, manifest=manifest), *self.previous_definitions(config, manifest)]
+        if plistlib.loads(self.plist.read_bytes()) not in recognized:
             raise RuntimeError('Refusing to remove an unfamiliar service definition')
         self.stop()
+        from sharingd import SharingdAgent
+        with activity.operation('Service', 'restore sharingd'):
+            SharingdAgent.restore_detached()
         self.plist.unlink()
         return {'login_enabled': False, 'package_preserved': str(self.package)}
 

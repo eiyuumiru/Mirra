@@ -3,13 +3,14 @@ from pathlib import Path
 import struct
 
 
-def require_ios_endpoint(path):
+def require_ios_endpoint(path, filetype=2):
+    """filetype 2 is an executable (the endpoint); 8 is a bundle (the Settings page)."""
     with Path(path).open('rb') as stream:
         header = stream.read(32)
         if len(header) != 32:
             raise ValueError('The endpoint has an incomplete Mach-O header')
         magic, cpu, subtype, kind, count, length, _, _ = struct.unpack('<8I', header)
-        if magic != 0xFEEDFACF or cpu != 0x100000C or kind != 2:
+        if magic != 0xFEEDFACF or cpu != 0x100000C or kind != filetype:
             raise ValueError('The endpoint must be a thin arm64 iOS executable')
         # arm64e uses the same CPU type as arm64. Checking only cputype accepts
         # a binary that cannot run on A11 and earlier bridge devices.

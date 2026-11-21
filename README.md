@@ -66,18 +66,21 @@ Check [host compatibility](#compatibility), including the
 1. Get the app DMG from [Releases](https://github.com/eiyuumiru/Mirra/releases)
    or the maintainer.
 2. Open the DMG, drag **Mirra.app** onto **Applications**, then eject the image.
-3. Open Mirra and set up a separate jailbroken iPhone running **iOS 15 or later**
-   as the bridge, with OpenSSH and `ldid` installed.
-   Choose Wi-Fi SSH or select the bridge's USB device and SSH port.
-4. Verify the SSH fingerprint and authorize access when prompted.
-5. Choose **Prepare connection**, then **Finish setup**.
-6. Keep the iPhone you want to mirror locked and nearby with Wi-Fi and Bluetooth
-   enabled. Choose **Connect** and complete Apple's authentication.
+3. In **Setup**, choose **Connect to an Existing iPhone** to pair over Wi-Fi
+   or USB with the token from the phone’s **Settings → Mirra Bridge**.
+   To install Mirra Bridge, choose **Set Up a New iPhone** and follow the SSH
+   setup on a separate jailbroken iPhone running **iOS 15 or later** with OpenSSH
+   and `ldid`.
+4. Choose **Finish Setup** to activate the verified bridge.
+5. Keep the iPhone you want to mirror locked and nearby with Wi-Fi and Bluetooth
+   enabled. Open Apple's **iPhone Mirroring** directly, or choose **Connect**
+   in Mirra, and complete Apple's authentication.
 
 The app includes Python and its helpers. For macOS security prompts and update
 instructions, see [Installation](docs/Installation.md).
 
-Settings contains bridge setup, service controls, appearance options and logs.
+The sidebar provides **Setup**, **Settings** for service and appearance controls,
+and **Logs** for diagnostics.
 Your saved setup survives app updates. Closing the Mirra window leaves background
 support running. See the [app guide](docs/App.md) for details.
 

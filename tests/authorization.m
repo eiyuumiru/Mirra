@@ -1,5 +1,5 @@
 #import <AppKit/AppKit.h>
-#import "../src/app/authorization.h"
+#import "authorization.h"
 #include <sys/stat.h>
 static int checks;
 static void require(BOOL condition, NSString *message) { checks++; if (!condition) { fprintf(stderr,"%s\n",message.UTF8String); exit(1); } }

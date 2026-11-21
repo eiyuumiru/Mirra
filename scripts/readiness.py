@@ -12,6 +12,7 @@ from processes import NativeAppObserver, process_birth
 from launcher import NativeLaunchAgent, AGENT
 from installation import NativeService
 from activity import emit
+from bridgeclient import BRIDGE_REVISION, bridge_revision, has_ssh_access, read_token, request_json
 
 
 def report(code, title, detail, *, actions=(), transport=None):
@@ -19,6 +20,26 @@ def report(code, title, detail, *, actions=(), transport=None):
             'state': code, 'title': title, 'detail': detail,
             'actions': list(actions), 'bridge_transport': transport,
             'mirroring_connection_verified': None}
+
+
+def bridge_update_report(config, timeout=2):
+    if not config.token_file.is_file():
+        return None
+    try:
+        status, reply = request_json(config, read_token(config.token_file), 'GET', '/v1/status', timeout=timeout)
+    except OSError:
+        return None
+    revision = bridge_revision(reply) if status == 200 else None
+    if revision is None or revision >= BRIDGE_REVISION:
+        return None
+    if has_ssh_access(config):
+        detail = 'Update Mirra Bridge on the iPhone through its saved SSH connection.'
+        actions = ('update_bridge', 'refresh')
+    else:
+        detail = 'Update the iPhone from a Mac with verified SSH access to this bridge, then check again here.'
+        actions = ('refresh', 'guide')
+    return report('bridge_update_available', 'Bridge update available', detail, actions=actions,
+                  transport=config.transport)
 
 
 def read_private(service, path):
@@ -83,7 +104,7 @@ def observe(service=None, *, timeout=2):
     service = service or NativeService()
     if not service.package.exists():
         return report('setup_required', 'Set up your bridge',
-                      'Choose Set up a bridge to connect over SSH and prepare its certificate and helper. Your bridge must already have jailbreak and SSH access.',
+                      'Open Setup to connect to an existing Mirra Bridge or set up a new bridge iPhone.',
                       actions=('setup',))
     try:
         manifest = service.validate_package()
@@ -99,7 +120,12 @@ def observe(service=None, *, timeout=2):
             return report('update_available', 'Update Mirra support',
                           'Choose Update and connect to install this version’s support using your saved bridge setup.',
                           actions=('install', 'guide'), transport=transport)
+        update = bridge_update_report(configuration, timeout)
         before = service.status()
+        if update is not None and not before.get('backend_ready'):
+            if before.get('registered'):
+                update['actions'].append('stop')
+            return update
         if not before.get('registered'):
             if before.get('supervisor_alive'):
                 return report('stopping', 'Finishing shutdown',
@@ -136,6 +162,20 @@ def observe(service=None, *, timeout=2):
         run = service.package / 'runtime' / before['run']
         backend = read_private(service, run / 'backend-status.json')
         if not before.get('backend_ready'):
+            certificate_issue = backend.get('certificate_issue')
+            if certificate_issue == 'renewing':
+                return report('renewing_certificate', 'Renewing bridge certificate',
+                              'Mirra is requesting a current certificate from your bridge.',
+                              actions=('refresh', 'stop'), transport=transport)
+            if certificate_issue == 'expired':
+                return report('bridge_certificate_expired', 'Bridge certificate expired',
+                              'Keep the bridge iPhone online. Mirra will retry automatically, or you can request another renewal now.',
+                              actions=('renew', 'refresh', 'stop'), transport=transport)
+            if certificate_issue in ('clock', 'invalid', 'unavailable'):
+                detail = ('Check the date and time on the Mac and bridge iPhone.' if certificate_issue == 'clock'
+                          else 'Mirra could not read a valid certificate from the bridge.')
+                return report('bridge_certificate_unavailable', 'Couldn’t validate the bridge certificate', detail,
+                              actions=('refresh', 'stop', 'guide'), transport=transport)
             if backend.get('phase') in ('failed', 'stopped') or not backend.get('automatic_recovery'):
                 return report('needs_attention', 'Background support needs attention',
                               'Automatic reconnection is not running. Check the bridge connection, then stop and start support.',
@@ -182,9 +222,14 @@ def observe(service=None, *, timeout=2):
             return report('waiting_for_mirroring_exit', 'Quit iPhone Mirroring',
                           'Support has reconnected. Quit Apple’s iPhone Mirroring with Command-Q to close the previous session, then refresh Mirra and choose Connect to start a fresh one.',
                           actions=('refresh', 'stop'), transport=transport)
-        return report('ready', 'Bridge is ready',
-                      'Choose Connect to find your iPhone in Apple’s iPhone Mirroring. Keep it locked and nearby, with Wi-Fi and Bluetooth on. The bridge is available; the iPhone connection is not yet confirmed.',
-                      actions=('open_mirroring', 'refresh', 'stop'), transport=transport)
+        ready = report('ready', 'Bridge is ready',
+                       'Choose Connect to find your iPhone in Apple’s iPhone Mirroring. Keep it locked and nearby, with Wi-Fi and Bluetooth on. The bridge is available; the iPhone connection is not yet confirmed.',
+                       actions=('open_mirroring', 'refresh', 'stop'), transport=transport)
+        if update is not None:
+            ready['bridge_update_detail'] = update['detail']
+            if 'update_bridge' in update['actions']:
+                ready['actions'].append('update_bridge')
+        return ready
     except (OSError, ValueError, RuntimeError, KeyError, TypeError, subprocess.SubprocessError) as error:
         emit('Status', 'observation failed', 'error', error_type=type(error).__name__, error=str(error))
         return report('unknown', 'Couldn’t confirm the current connection',

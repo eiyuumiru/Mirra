@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Temporarily run sharingd with the Mirra keystore adapter, then restore Apple's job."""
+"""Temporarily load the Mirra keystore adapter into Apple's sharingd job, then restart it unmodified."""
 import argparse
+import base64
 import json
 import os
 import plistlib
@@ -13,7 +14,7 @@ from pathlib import Path
 from configuration import load_config
 from lifetime import add_lifetime_arguments,duration_from_arguments,deadline_for,watch_parent_pipe,emit_event
 from logs import BoundedLogs
-from sharingd import SharingdAgent,service,is_original,ORIGINAL_PLIST
+from sharingd import SharingdAgent,service,is_original,ORIGINAL_PLIST,backup_pairing
 
 ROOT = Path(__file__).resolve().parents[1] / "runtime"
 WORKSPACE = ROOT / "host"
@@ -63,28 +64,58 @@ if original_before.get("injected"):
 if TARGET != ORIGINAL and service(TARGET):
     raise SystemExit("A Mirra sharingd job is already registered")
 WORKSPACE.chmod(0o700)
-configuration = plistlib.loads(ORIGINAL_PLIST.read_bytes())
-configuration.update({
-    "Label": LABEL,
-    "Program": "/usr/libexec/sharingd",
-    "KeepAlive": False,
-    "EnvironmentVariables": {
-        "DYLD_INSERT_LIBRARIES": str(WORKSPACE / "keystore.dylib"),
+# Read by the adapter inside sharingd only; never placed in launchd's environment.
+# Survives Mirra stops: Apple's sharingd deletes the pairing key when it runs alone.
+STATE = Path.home() / "Library/Application Support/Mirra/state"
+STATE.mkdir(mode=0o700, parents=True, exist_ok=True)
+if STATE.stat().st_uid != os.getuid() or STATE.stat().st_mode & 0o077:
+    raise SystemExit("Mirra state directory must be private")
+PAIRING_BACKUP = STATE / "pairing.plist"
+BROKER_FILE = STATE / "broker.json"
+# A detached sharingd outlives this workspace, so its output goes to a stable file.
+LOGS = Path.home() / "Library/Application Support/Mirra/logs"
+SHARINGD_LOGS = {1: LOGS / "sharingd.stdout.log", 2: LOGS / "sharingd.log"}
+
+
+def publish_broker(online):
+    """Rewrite the broker file in place: the adapter reads it through a descriptor
+    opened before sharingd's sandbox started, so the inode must not change."""
+    value = {"online": online}
+    if online:
+        value.update(socket=broker["socket"], tcp_port=broker["tcp_port"], token=broker["auth_token"],
+                     certificate=base64.b64encode(Path(broker["certificate"]).read_bytes()).decode())
+    data = json.dumps(value).encode()
+    descriptor = os.open(BROKER_FILE, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        info = os.fstat(descriptor)
+        if info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise RuntimeError("Mirra broker file must be private")
+        os.ftruncate(descriptor, 0)
+        os.pwrite(descriptor, data, 0)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+settings = {
+    "attested_ltk_backup": str(STATE / "attested-ltk.plist"),
+    "broker_file": str(BROKER_FILE),
+    "stdout": str(SHARINGD_LOGS[1]),
+    "stderr": str(SHARINGD_LOGS[2]),
+    "environment": {
         "MIRRA_KEYSTORE_BROKER_SOCKET": broker["socket"],
         "MIRRA_KEYSTORE_BROKER_TCP_PORT": str(broker["tcp_port"]),
         "MIRRA_KEYSTORE_BROKER_TOKEN": broker["auth_token"],
         "MIRRA_KEYSTORE_DCRT_PATH": broker["certificate"],
         "MIRRA_KEYSTORE_DIAGNOSTIC_ERRORS": "1",
+        "MIRRA_ASSERT_DELAY_MODE": "2",
+        "MIRRA_PAIRING_TRANSPORT": "wifi",
     },
-    "StandardOutPath": str(WORKSPACE / "sharingd.stdout.log"),
-    "StandardErrorPath": str(WORKSPACE / "sharingd.stderr.log"),
-})
-configuration["EnvironmentVariables"]["MIRRA_ASSERT_DELAY_MODE"] = "2"
-configuration["EnvironmentVariables"]["MIRRA_PAIRING_TRANSPORT"] = "wifi"
-for name in ["sharingd.stdout.log", "sharingd.stderr.log"]:
-    path = WORKSPACE / name
-    path.write_text("")
-    path.chmod(0o600)
+}
+for path in SHARINGD_LOGS.values():
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+    os.close(descriptor)
+publish_broker(True)
 stop = threading.Event()
 signal.signal(signal.SIGTERM, lambda *_: stop.set())
 signal.signal(signal.SIGINT, lambda *_: stop.set())
@@ -92,37 +123,70 @@ if args.parent_lifeline:
     watch_parent_pipe(0,stop.set)
 log_limits=BoundedLogs(on_error=stop.set)
 agent = SharingdAgent(WORKSPACE)
+failed = False
 try:
     if stop.is_set():
         raise InterruptedError('Parent ended before sharingd startup')
-    agent.start(configuration)
-    deadline = time.monotonic() + 8
-    while time.monotonic() < deadline:
-        if stop.is_set():
-            raise InterruptedError('Parent ended during sharingd startup')
+    agent.start(WORKSPACE / "keystore.dylib", settings, PAIRING_BACKUP,
+                reuse_detached=health.get('can_resume_pairing') is True)
+    if agent.adopted:
+        # The adapter from an earlier session is still loaded; it reads the new
+        # broker from BROKER_FILE, and sharingd keeps the iPhone pairing armed.
         state = service(TARGET)
-        if state.get("state") == "running" and state.get("pid"):
-            marker = f"MIRRA_KEYSTORE_SHIM_LOADED pid={state['pid']} enabled=1"
-            if marker in (WORKSPACE / "sharingd.stderr.log").read_text(errors="replace"):
-                break
-        time.sleep(0.2)
+        if str(state.get("pid")) != str(agent.record.get("injected_pid")):
+            raise RuntimeError("The detached sharingd adapter is no longer running")
     else:
-        raise RuntimeError(f"sharingd did not load the adapter: {state}")
-    for fd,name in [(1,'sharingd.stdout.log'),(2,'sharingd.stderr.log')]:
-        log_limits.watch_native(WORKSPACE/name,int(state['pid']),fd)
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            if stop.is_set():
+                raise InterruptedError('Parent ended during sharingd startup')
+            state = service(TARGET)
+            if state.get("state") == "running" and state.get("pid"):
+                marker = f"MIRRA_KEYSTORE_SHIM_LOADED pid={state['pid']} enabled=1"
+                if marker in SHARINGD_LOGS[2].read_text(errors="replace"):
+                    break
+            time.sleep(0.2)
+        else:
+            raise RuntimeError(f"sharingd did not load the adapter: {state}")
+        agent.record_injected(state['pid'])
+    for fd, path in SHARINGD_LOGS.items():
+        log_limits.watch_native(path, int(state['pid']), fd)
     record = {"controller_pid": os.getpid(), "job": TARGET, "state": state,
+              "restored_pairing_entries": agent.restored_pairing, "adopted_sharingd": agent.adopted,
               "original_before": original_before, "automatic_restore_seconds": duration}
     (WORKSPACE / "sharing.json").write_text(json.dumps(record, indent=2) + "\n")
     emit_event({"WORKSPACE_RUNNING": record})
     deadline = deadline_for(duration)
+    ticks = 0
     while not stop.wait(1) and time.monotonic() < deadline:
-        if not service(TARGET).get("pid"):
-            raise RuntimeError("Bridge controller exited")
+        ticks += 1
+        if ticks % 10 == 0:
+            try:
+                backup_pairing(PAIRING_BACKUP)
+            except (OSError, ValueError) as error:
+                emit_event({"PAIRING_BACKUP_FAILED": str(error)})
+        # Apple's job restarts sharingd by itself, but never with the adapter.
+        if service(TARGET).get("pid") != state["pid"]:
+            raise RuntimeError("sharingd restarted without the Mirra adapter")
+except BaseException:
+    failed = True
+    raise
 finally:
     try:
         if agent.owned:
-            state = agent.close()
-            emit_event({"ORIGINAL_RESTORED": state})
+            try:
+                # Before Apple's sharingd runs again and removes the entries.
+                backup_pairing(PAIRING_BACKUP)
+            except (OSError, ValueError) as error:
+                emit_event({"PAIRING_BACKUP_FAILED": str(error)})
+            try:
+                publish_broker(False)  # The adapter keeps the pairing while offline.
+            except (OSError, RuntimeError) as error:
+                emit_event({"BROKER_FILE_FAILED": str(error)})
+            # Only a normal stop of the long-running service keeps the adapter.
+            detach = stop.is_set() and duration is None and not failed
+            state = agent.close(detach=detach)
+            emit_event({"SHARINGD_DETACHED" if detach else "ORIGINAL_RESTORED": state})
     finally:
         (WORKSPACE/'sharingd-log-limits.json').write_text(json.dumps(log_limits.close(),indent=2)+'\n')
 

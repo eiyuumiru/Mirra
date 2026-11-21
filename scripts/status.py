@@ -15,7 +15,7 @@ def main():
     else:
         print(value['title'] + '\n\n' + value['detail'])
         if value['bridge_transport']:
-            print('\nBridge connection: ' + ('Wi-Fi / SSH' if value['bridge_transport'] == 'ssh' else 'USB'))
+            print('\nBridge connection: ' + ('Wi-Fi' if value['bridge_transport'] == 'ssh' else 'USB'))
         print('\nThis checks support readiness. Live video, input and audio still need a real Mirroring session.')
 
 

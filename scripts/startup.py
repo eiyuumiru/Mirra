@@ -6,9 +6,10 @@ import signal
 import stat
 import subprocess
 import threading
+import time
 
 from lifetime import emit_event
-from processes import process_birth
+from processes import NativeAppObserver, process_birth
 from state import write_state
 
 
@@ -31,8 +32,54 @@ def mirroring_running():
     return result.returncode == 0
 
 
-def wait_for_mirroring_exit(stop, state_path):
-    """Wait before session mutations, without retrying failed preparation."""
+MIRRORING_EXECUTABLE = Path('/System/Applications/iPhone Mirroring.app/Contents/MacOS/iPhone Mirroring')
+MIRRORING_BUNDLE = 'com.apple.ScreenContinuity'
+
+
+def quit_mirroring(term_seconds=6, kill_seconds=3):
+    """Quit this user's original iPhone Mirroring app; True when one was running and is gone.
+
+    macOS often restores the app at login before support starts. That copy has
+    none of the launch hooks, so it must quit before a session is prepared. Only
+    processes owned by this user and running Apple's system executable are
+    signalled; anything else is left alone and the caller keeps waiting.
+    """
+    observer = NativeAppObserver(MIRRORING_EXECUTABLE, '')
+
+    def running():
+        result = subprocess.run(['pgrep', '-x', 'iPhone Mirroring'], capture_output=True, text=True, timeout=5)
+        if result.returncode not in (0, 1):
+            raise OSError('Could not list iPhone Mirroring processes')
+        return [int(value) for value in result.stdout.split()
+                if value.isdecimal() and observer.identity(int(value)) is not None]
+
+    if not running():
+        return False
+    for sig, seconds in ((signal.SIGTERM, term_seconds), (signal.SIGKILL, kill_seconds)):
+        for pid in running():
+            try:
+                os.kill(pid, sig)
+            except ProcessLookupError:
+                pass
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if not running():
+                return True
+            time.sleep(.1)
+    return False
+
+
+def relaunch_mirroring():
+    """Reopen the app through LaunchServices so the support launch hooks apply."""
+    result = subprocess.run(['/usr/bin/open', '-b', MIRRORING_BUNDLE], capture_output=True, text=True, timeout=20)
+    return result.returncode == 0
+
+
+def wait_for_mirroring_exit(stop, state_path, quit_app=None):
+    """Wait before session mutations, without retrying failed preparation.
+
+    With `quit_app`, an open app is asked to quit once instead of waiting for
+    the user; if that fails, the wait continues as before."""
     state_path = Path(state_path)
     birth = process_birth(os.getpid())
 
@@ -55,6 +102,12 @@ def wait_for_mirroring_exit(stop, state_path):
             phase('waiting_for_mirroring_exit')
             emit_event({'NATIVE_STARTUP_WAITING': 'Quit iPhone Mirroring to continue'})
             waiting = True
+            if quit_app is not None:
+                try:
+                    quit_app()
+                except (OSError, subprocess.SubprocessError) as error:
+                    emit_event({'NATIVE_MIRRORING_QUIT_FAILED': type(error).__name__})
+                continue
         stop.wait(.5)
     return False
 

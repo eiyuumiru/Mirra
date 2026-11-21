@@ -58,6 +58,27 @@ class SharingdRecoveryTests(unittest.TestCase):
             command.assert_not_called()
         self.assertTrue(self.agent.journal.exists())
 
+    def test_update_keeps_only_an_identical_live_detached_adapter(self):
+        from sharingd import SharingdAgent
+        record = {'adapter_sha256': 'a' * 64, 'detached': True}
+        for alive, digest, expected in ((True, 'a' * 64, True), (True, 'b' * 64, False), (False, 'a' * 64, False)):
+            with patch.object(SharingdAgent, 'acquire'), \
+                    patch.object(SharingdAgent, 'read_journal', return_value=record), \
+                    patch.object(SharingdAgent, 'detached_alive', return_value=alive):
+                self.assertIs(SharingdAgent.detached_matches(digest), expected)
+
+    def test_detached_adapter_is_not_adopted_after_the_bridge_loses_its_sessions(self):
+        adapter = self.directory / 'keystore.dylib'
+        adapter.write_bytes(b'test adapter')
+        detached = {'adapter_sha256': hashlib.sha256(adapter.read_bytes()).hexdigest(), 'detached': True}
+        with patch.object(self.agent, 'read_journal', return_value=detached), \
+                patch.object(self.agent, 'detached_alive', return_value=True), \
+                patch.object(self.agent, '_recover_under_lock', side_effect=RuntimeError('fresh startup')) as recover:
+            with self.assertRaisesRegex(RuntimeError, 'fresh startup'):
+                self.agent.start(adapter, {}, reuse_detached=False)
+        recover.assert_called_once_with(restore_detached=True)
+        self.assertFalse(self.agent.adopted)
+
     def test_identity_observation_failure_is_not_death(self):
         with patch('sharingd.process_birth', side_effect=OSError('not observable')), \
                 patch('sharingd.launchctl') as command:

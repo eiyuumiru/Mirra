@@ -18,6 +18,8 @@ from processes import process_birth
 from state import write_state
 from workspace import BrokerWorkspace, cleanup as cleanup_workspace
 from health import health, wait_for_backend_loss
+from certificates import CertificateError, current_certificate
+from provisioning import exclusive_write
 
 os.umask(0o077)
 ROOT = Path(__file__).resolve().parents[1] / "runtime"
@@ -96,10 +98,35 @@ def record_child(name, pid):
 
 
 try:
+    try:
+        certificate, _, _, renewed = current_certificate(configuration, ROOT / 'certificate-renewal.json',
+            lambda: print(json.dumps({'BRIDGE_CERTIFICATE_RENEWAL': True}), flush=True))
+    except CertificateError as error:
+        # A device certificate that is only past its notAfter is not fatal: the
+        # iPhone's Secure Enclave still issues and validates attested keys from it
+        # (the broker's generate/validate self-check is the real gate), and a
+        # jailbroken bridge cannot always mint a fresh BAA certificate on demand,
+        # so MobileActivation keeps returning the same expired one. Keep running on
+        # the enrolled certificate and let attestation decide. Every other failure
+        # (clock, invalid, unavailable, busy) still stops the backend so its status
+        # reaches the app. Renewal was already attempted and recorded its cooldown.
+        if error.code != 'expired':
+            print(json.dumps({'BRIDGE_CERTIFICATE_ERROR': error.code, 'retry_at': error.retry_at}), flush=True)
+            raise SystemExit(str(error)) from error
+        certificate = configuration.certificate_file.read_bytes()
+        renewed = False
+        print(json.dumps({'BRIDGE_CERTIFICATE_EXPIRED_TOLERATED': True, 'retry_at': error.retry_at}), flush=True)
+    print(json.dumps({'BRIDGE_CERTIFICATE_READY': True}), flush=True)
+    effective_certificate = private / 'certificate.der'
+    exclusive_write(effective_certificate, certificate)
+    certificate_args = ['--certificate', str(effective_certificate)]
+    if renewed:
+        certificate_args.append('--renewed-certificate')
     with open_append(broker_log) as output:
         log_limits.watch_stream(broker_log,output)
         broker_command = [sys.executable, '-E', '-s', '-B', str(SCRIPTS / "broker.py"), "--socket",
-                          str(private / "broker.sock"), "--state-file", str(STATE), '--parent-lifeline', *config_args]
+                          str(private / "broker.sock"), "--state-file", str(STATE), '--parent-lifeline',
+                          *config_args, *certificate_args]
         broker = subprocess.Popen(broker_command,
                                   stdin=subprocess.PIPE, stdout=output, stderr=subprocess.STDOUT, text=True,
                                   pass_fds=(workspace.lease,))

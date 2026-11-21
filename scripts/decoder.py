@@ -19,7 +19,10 @@ from state import write_state
 from lifetime import emit_event
 from redaction import redact_text, redact_value
 
-INSPECTED_BUILD = '25G332'
+# Intel builds whose AVConference still imports VCPDecompressionSessionCreate
+# from VideoProcessing, so the decoder hook interposes the same call.
+INSPECTED_BUILDS = ('25G332', '25G342')
+INSPECTED_BUILD = INSPECTED_BUILDS[0]
 
 
 def host_profile():
@@ -35,10 +38,10 @@ def select_route(mode, host):
     """Select by inspected ABI; auto filters the actual stream in the hook."""
     if mode not in ('auto', 'normal', 'no_fls'):
         raise ValueError('Unknown decoder route setting')
-    compatible = host.get('architecture') == 'x86_64' and host.get('build') == INSPECTED_BUILD
+    compatible = host.get('architecture') == 'x86_64' and host.get('build') in INSPECTED_BUILDS
     enabled = mode == 'no_fls' or (mode == 'auto' and compatible)
     if enabled and not compatible:
-        raise RuntimeError('The decoder route has been inspected for Intel macOS build 25G332 only')
+        raise RuntimeError('The decoder route has been inspected for Intel macOS builds ' + ', '.join(INSPECTED_BUILDS) + ' only')
     reason = ('explicit decoder route' if mode != 'auto' else
               'automatic Display P3/FLS compatibility' if enabled else 'normal decoder for this host')
     return {'requested': mode, 'mode': 'no_fls' if enabled else 'normal',

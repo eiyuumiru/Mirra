@@ -116,7 +116,7 @@
     NSStackView *buttons = [NSStackView stackViewWithViews:@[self.primary]]; self.actionRow = buttons; MirraAdd(stack,buttons);
     [self.primary.centerXAnchor constraintEqualToAnchor:buttons.centerXAnchor].active = YES;
     self.again = MirraAction(@"Change phone", self, @selector(startAgain:), NO); [stack addArrangedSubview:self.again];
-    NSTextField *note = MirraLabel(@"The setup phone must be jailbroken, with SSH and ldid installed. The iPhone you mirror can stay unmodified. Mirra prepares the certificate for you.", 12, NSFontWeightRegular);
+    NSTextField *note = MirraLabel(@"The setup phone must be jailbroken, with SSH and ldid installed. SSH is used only to install Mirra’s bridge service. The iPhone you mirror can stay unmodified. Mirra prepares the certificate for you.", 12, NSFontWeightRegular);
     note.textColor = NSColor.secondaryLabelColor; note.alignment = NSTextAlignmentCenter; MirraAdd(stack, note);
 }
 - (void)controlTextDidChange:(NSNotification *)notification { (void)notification; self.draftEdited = YES; }
@@ -124,7 +124,7 @@
     self.passwordReply = reply; self.passwordForm.hidden = NO; self.actionRow.hidden = YES; self.again.hidden = YES;
     self.primary.keyEquivalent = @""; self.authorizeButton.keyEquivalent = @"\r";
     self.passwordPrompt.stringValue = prompt.length ? prompt : @"Phone SSH password";
-    self.detail.stringValue = @"Enter the setup phone’s SSH password. It goes directly to SSH and is never saved.";
+    self.detail.stringValue = @"Enter the setup phone’s account password. It is used once over SSH and never saved.";
     [self.progress stopAnimation:nil]; [self.view.window makeFirstResponder:self.password];
 }
 - (void)submitPassword:(id)sender {
@@ -151,7 +151,7 @@
         @"contact": @[@"Reach your setup phone", @"Keep your setup phone connected with SSH and its jailbreak running, then retry.", @"Retry connection"],
         @"trust": @[@"Verify this phone", @"Compare this host-key fingerprint with the one on your phone or in an already trusted SSH connection. Continue only if they match.", @"Trust this phone"],
         @"authorize": @[@"Allow secure access", @"Mirra will add its public key to your setup phone. Continue to authorize access; enter the SSH password here if asked.", @"Authorize SSH"],
-        @"deploy": @[@"Prepare your connection", @"Mirra will install its helper and prepare secure access for this phone. It uses the phone’s certificate when available, or requests one automatically, then checks the connection.", @"Prepare connection"],
+        @"deploy": @[@"Prepare your connection", @"Mirra will install its bridge service on this phone over SSH and save the pairing token shown in the phone’s Settings → Mirra Bridge. From then on Mirra connects over an encrypted channel instead of SSH. It uses the phone’s certificate when available, or requests one automatically, then checks the connection.", @"Prepare connection"],
         @"ready": @[@"Finish setup", @"Your setup phone passed verification. Finish to use this connection and keep Mirra available when you sign in. Any current Mirroring session will close.", @"Finish setup"],
         @"installed": @[@"You’re ready", @"Keep your target iPhone locked and nearby. Connect to open Apple’s iPhone Mirroring and complete its authentication.", @"Connect"]
     };
@@ -209,7 +209,9 @@
     }
     NSUInteger revision = self.revision;
     [self render:self.state ?: @{@"phase": @"new"}];
-    if ([action isEqual:@"connect"]) {
+    // connect may ask for the SSH password; provision may ask once for the
+    // sudo password needed to install the bridge service on the phone.
+    if ([action isEqual:@"connect"] || [action isEqual:@"provision"]) {
         __weak Wizard *weak = self;
         self.authorization = [[Authorization alloc] initWithPrompt:^(NSString *prompt, void (^reply)(NSString *)) { [weak requestPassword:prompt reply:reply]; }];
         if (!self.authorization) { self.busy = NO; NSMutableDictionary *failed = [self.state mutableCopy]; failed[@"error"] = @"Secure password entry could not start. Please try again."; [self render:failed]; return; }

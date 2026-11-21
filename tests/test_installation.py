@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from configuration import load_config
-from installation import NativeService, PACKAGE_ADAPTERS, HOST_TOOLS, PACKAGE_SCHEMA, SUPPORT_REVISION
+from installation import NativeService, PACKAGE_ADAPTERS, SUPPORT_TOOLS, PACKAGE_SCHEMA, SUPPORT_REVISION, CLI_NAME, BRIDGE_UPDATE_FILES
 from state import write_state
 from test_interpreter import fixture_runtime
 
@@ -29,12 +29,16 @@ class NativeServiceTests(unittest.TestCase):
         (self.source / 'scripts/native.py').write_text('print("test fixture")\n')
         for name in ('decoder.py', 'decoder_route.py', 'startup.py'):
             (self.source / 'scripts' / name).write_text('# test fixture\n')
-        for name in PACKAGE_ADAPTERS + HOST_TOOLS:
+        for name in PACKAGE_ADAPTERS + SUPPORT_TOOLS:
             (self.source / 'build' / name).write_bytes(b'test fixture only')
+        for name in BRIDGE_UPDATE_FILES:
+            path = self.source / name
+            path.parent.mkdir(exist_ok=True)
+            path.write_bytes(b'test fixture only')
         fixture_runtime(self.source / 'python')
         (self.source / 'config.json').write_text('{}')
         self.config = replace(load_config(self.source / 'config.json', root=self.source), transport='usb', product_type='iPhone11,2')
-        for name in ['user_file', 'identity_file', 'known_hosts_file', 'certificate_file']:
+        for name in ['user_file', 'identity_file', 'known_hosts_file', 'certificate_file', 'token_file']:
             path = getattr(self.config, name)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(b'private test fixture')
@@ -129,8 +133,8 @@ class NativeServiceTests(unittest.TestCase):
         fixture_runtime(self.source / 'python')
         self.prepare()
         self.assertEqual(self.service.validate_package()['schema_version'], PACKAGE_SCHEMA)
-        executable = self.service.package / 'python/bin/python3'
-        self.assertEqual(self.service.definition(self.config)['ProgramArguments'][0], str(executable))
+        executable = self.service.package / 'build' / CLI_NAME
+        self.assertEqual(self.service.definition(self.config)['ProgramArguments'], [str(executable), 'run-service'])
         (self.source / 'python/bin/python3').write_bytes(b'changed source')
         self.service.validate_package()
 
@@ -195,11 +199,11 @@ class NativeServiceTests(unittest.TestCase):
                 self.prepare()
         self.assertFalse(self.service.package.exists())
 
-    def test_usb_and_ssh_service_definitions_use_appropriate_transport(self):
+    def test_usb_and_wifi_use_the_same_login_job(self):
         usb = self.service.definition(self.config)
         ssh = self.service.definition(replace(self.config, transport='ssh'))
-        self.assertIn('--manage-usb', usb['ProgramArguments'])
-        self.assertNotIn('--manage-usb', ssh['ProgramArguments'])
+        self.assertEqual(usb, ssh)
+        self.assertTrue(usb['RunAtLoad'])
         self.assertTrue(usb['KeepAlive'])
         self.assertEqual(usb['LimitLoadToSessionType'], 'Aqua')
         self.assertGreaterEqual(usb['ExitTimeOut'], 100)
@@ -230,10 +234,9 @@ class NativeServiceTests(unittest.TestCase):
         self.assertEqual(installed.transport, replacement)
         self.assertEqual(plistlib.loads(self.service.plist.read_bytes()), self.service.definition(installed))
         self.assertEqual(self.service.plist.stat().st_mode & 0o777, 0o600)
-        backup = Path(result['previous_plist'])
-        self.assertEqual(backup.read_bytes(), previous)
-        self.assertEqual(backup.stat().st_mode & 0o777, 0o600)
-        self.assertEqual(len(list(self.service.base.glob('service.previous.*.plist'))), 1)
+        self.assertNotIn('previous_plist', result)
+        self.assertEqual(self.service.plist.read_bytes(), previous)
+        self.assertFalse(list(self.service.base.glob('service.previous.*.plist')))
         self.assertNotIn('previous_plist', again)
         packages = list(self.service.base.glob('previous-*'))
         self.assertEqual(len(packages), 1)
@@ -278,7 +281,7 @@ class NativeServiceTests(unittest.TestCase):
         manifest = json.loads(path.read_text())
         manifest['schema_version'] = 4
         manifest.pop('support_revision')
-        for name in ('scripts/decoder.py', 'scripts/decoder_route.py', 'build/decoder-route.dylib'):
+        for name in ('scripts/decoder.py', 'scripts/decoder_route.py', 'build/decoder-route.dylib', 'build/' + CLI_NAME):
             manifest['files'].pop(name)
             (self.service.package / name).unlink()
         write_state(path, manifest)
@@ -293,7 +296,7 @@ class NativeServiceTests(unittest.TestCase):
         previous = load_config(self.service.package / 'config.json')
         credentials = {name: getattr(previous, name).read_bytes() for name in
                        ('identity_file', 'user_file', 'known_hosts_file', 'certificate_file')}
-        self.install_plist(self.service.definition(previous))
+        self.install_plist(self.service.definition(previous, manifest=legacy))
         with patch.object(self.service, 'registration', return_value={}), \
              patch.object(self.service, 'stop', return_value={}) as stop, \
              patch.object(self.service, 'start', return_value={}), \
@@ -330,7 +333,7 @@ class NativeServiceTests(unittest.TestCase):
         value = json.loads(manifest.read_text())
         value['support_revision'] = SUPPORT_REVISION - 1
         write_state(manifest, value)
-        self.install_plist(self.service.definition(self.config))
+        self.install_plist(self.service.definition(self.config, manifest=value))
         run = self.service.package / 'runtime/native-20261110-000056'
         backend = run / 'backend-000009'
         backend.mkdir(parents=True, mode=0o700)
@@ -411,7 +414,7 @@ class NativeServiceTests(unittest.TestCase):
         value = json.loads(manifest.read_text())
         value['support_revision'] = SUPPORT_REVISION - 1
         write_state(manifest, value)
-        self.install_plist(self.service.definition(self.config))
+        self.install_plist(self.service.definition(self.config, manifest=value))
         run = self.service.package / 'runtime/native-20261111-073111'
         run.mkdir(parents=True, mode=0o700)
         missing = run.parent / 'native-20261111-065931/backend-000001'
@@ -662,7 +665,7 @@ class NativeServiceTests(unittest.TestCase):
         write_state(path, manifest)
         previous = load_config(self.service.package / 'config.json')
         definition = self.service.definition(previous)
-        self.install_plist(definition)
+        self.install_plist(self.service.definition(previous, manifest=manifest))
         self.assertTrue(self.service.needs_update())
         with patch.object(self.service, 'registration', return_value={}), \
                 patch.object(self.service, 'stop', return_value={}) as stop, \
@@ -724,9 +727,26 @@ class NativeServiceTests(unittest.TestCase):
         wait.assert_called_once()
         self.assertTrue(value['last_cleanup_verified'])
 
-    def test_transport_migration_refuses_a_registered_job(self):
+    def stage_cli_replacement(self, *, legacy_usb=False):
         self.prepare()
-        previous = self.install_plist(self.service.definition(replace(self.config, transport='ssh')))
+        manifest_path = self.service.package / 'manifest.json'
+        old = json.loads(manifest_path.read_text())
+        old['support_revision'] = 39
+        old['files'].pop('build/' + CLI_NAME)
+        (self.service.package / 'build' / CLI_NAME).unlink()
+        write_state(manifest_path, old)
+        definition = self.service.definition(self.config, manifest=old)
+        if legacy_usb:
+            definition['ProgramArguments'].append('--manage-usb')
+        previous = self.install_plist(definition)
+        with patch.object(self.service, 'registration', return_value={}), \
+                patch('installation.subprocess.run', return_value=subprocess.CompletedProcess([], 0)):
+            self.service.prepare(replace_package=True)
+        self.assertEqual(self.service.plist.read_bytes(), previous)
+        return previous
+
+    def test_cli_migration_refuses_a_registered_job(self):
+        previous = self.stage_cli_replacement()
         with patch.object(self.service, 'registration', return_value={'state': 'running'}), \
                 patch.object(self.service, 'start') as start:
             with self.assertRaisesRegex(RuntimeError, 'Stop the service'):
@@ -735,9 +755,8 @@ class NativeServiceTests(unittest.TestCase):
         self.assertEqual(self.service.plist.read_bytes(), previous)
         self.assertFalse(list(self.service.base.glob('service.previous.*.plist')))
 
-    def test_transport_migration_waits_for_an_unregistered_live_supervisor(self):
-        self.prepare()
-        previous = self.install_plist(self.service.definition(replace(self.config, transport='ssh')))
+    def test_cli_migration_waits_for_an_unregistered_live_supervisor(self):
+        previous = self.stage_cli_replacement()
         birth = [42, os.getuid(), 100, 3]
         write_state(self.service.state, {'supervisor_birth': birth})
         with patch.object(self.service, 'registration', return_value={}), \
@@ -760,9 +779,8 @@ class NativeServiceTests(unittest.TestCase):
             start.assert_not_called()
         self.assertEqual(self.service.plist.read_bytes(), previous)
 
-    def test_interrupted_transport_install_preserves_original_and_can_retry(self):
-        self.prepare()
-        previous = self.install_plist(self.service.definition(replace(self.config, transport='ssh')))
+    def test_interrupted_cli_install_preserves_original_and_can_retry(self):
+        previous = self.stage_cli_replacement(legacy_usb=True)
         with patch.object(self.service, 'registration', return_value={}), \
                 patch.object(self.service, 'start', return_value={}) as start:
             with patch('installation.os.replace', side_effect=OSError('simulated disk failure')):
@@ -778,15 +796,42 @@ class NativeServiceTests(unittest.TestCase):
             start.assert_called_once()
         self.assertEqual(plistlib.loads(self.service.plist.read_bytes()), self.service.definition(self.config))
 
-    def test_transport_install_rechecks_registration_before_replacement(self):
-        self.prepare()
-        previous = self.install_plist(self.service.definition(replace(self.config, transport='ssh')))
+    def test_cli_install_rechecks_registration_before_replacement(self):
+        previous = self.stage_cli_replacement()
         with patch.object(self.service, 'registration', side_effect=[{}, {'state': 'running'}]), \
                 patch.object(self.service, 'start') as start:
             with self.assertRaisesRegex(RuntimeError, 'changed during installation'):
                 self.service.install()
             start.assert_not_called()
         self.assertEqual(self.service.plist.read_bytes(), previous)
+
+    def test_start_recovers_when_only_the_old_definition_remains(self):
+        self.stage_cli_replacement()
+        bootstrap = subprocess.CompletedProcess([], 0)
+        with patch.object(self.service, 'registration', return_value={}), \
+                patch.object(self.service, 'command', return_value=bootstrap) as command:
+            self.service.start()
+        command.assert_called_once_with('bootstrap', self.service.domain, str(self.service.plist))
+        self.assertEqual(plistlib.loads(self.service.plist.read_bytes()), self.service.definition(self.config))
+
+    def test_update_from_app_registered_support_returns_to_the_cli(self):
+        self.prepare()
+        app = self.root / 'Mirra.app'
+        manifest_path = self.service.package / 'manifest.json'
+        old = json.loads(manifest_path.read_text())
+        old.update(support_revision=41, managed_app=str(app))
+        write_state(manifest_path, old)
+        saved_config = load_config(self.service.package / 'config.json')
+        with patch.object(self.service, 'registration', return_value={}), \
+                patch.object(self.service, 'background_action', return_value='not_registered') as manage, \
+                patch.object(self.service, 'command', return_value=subprocess.CompletedProcess([], 0)) as launch, \
+                patch('installation.subprocess.run', return_value=subprocess.CompletedProcess([], 0)):
+            self.service.update_saved()
+        manage.assert_called_once_with('unregister')
+        launch.assert_called_once_with('bootstrap', self.service.domain, str(self.service.plist))
+        self.assertIsNone(self.service.managed_app())
+        self.assertEqual(load_config(self.service.package / 'config.json'), saved_config)
+        self.assertEqual(plistlib.loads(self.service.plist.read_bytes()), self.service.definition(self.config))
 
     def test_first_install_does_not_clobber_a_concurrently_created_plist(self):
         self.prepare()
