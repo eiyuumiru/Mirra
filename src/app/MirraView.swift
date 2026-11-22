@@ -6,6 +6,7 @@ struct MirraView: View {
     @ObservedObject var model: MirraModel
     @AppStorage("MirraAppearance") private var appearance = AppearanceMode.system.rawValue
     @State private var importing = false
+    @State private var confirmingReset = false
 
     private var selection: Binding<Page?> {
         Binding(get: { model.page }, set: { if let page = $0 { model.navigate(to: page) } })
@@ -81,6 +82,21 @@ struct MirraView: View {
                 }
                 Button("Refresh Status") { Task { await model.refresh() } }
                     .disabled(model.busy || model.checking)
+            }
+
+            if model.report.actions.contains("stop") || model.report.actions.contains("start") {
+                Section("iPhone Mirroring") {
+                    Button("Reset iPhone Mirroring…", role: .destructive) { confirmingReset = true }
+                        .disabled(model.busy)
+                    Text("Forgets this Mac’s saved pairing instead of restoring it. The next connection pairs again and the iPhone asks for its passcode.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .confirmationDialog("Reset iPhone Mirroring?", isPresented: $confirmingReset) {
+                    Button("Reset", role: .destructive) { Task { await model.resetMirroring() } }
+                } message: {
+                    Text("Support restarts and this Mac pairs with the iPhone again from scratch. Other Macs using the same bridge keep their pairing.")
+                }
             }
 
             Section("Appearance") {

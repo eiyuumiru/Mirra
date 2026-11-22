@@ -74,16 +74,7 @@ impl Error {
     /// Python `type(error).__name__`.
     pub fn type_name(&self) -> String {
         match self {
-            Error::Os(e) | Error::OsPath { error: e, .. } => match e.raw_os_error() {
-                Some(n) => os_error_name(n).to_string(),
-                None => match e.kind() {
-                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => "TimeoutError".into(),
-                    io::ErrorKind::NotFound => "FileNotFoundError".into(),
-                    io::ErrorKind::BrokenPipe => "BrokenPipeError".into(),
-                    io::ErrorKind::InvalidData => "ValueError".into(),
-                    _ => "OSError".into(),
-                },
-            },
+            Error::Os(e) | Error::OsPath { error: e, .. } => io_error_name(e),
             Error::OsMessage { errno, .. } => os_error_name(*errno).to_string(),
             Error::Value(_) => "ValueError".into(),
             Error::Runtime(_) => "RuntimeError".into(),
@@ -101,6 +92,20 @@ impl Error {
             Error::TimeoutExpired { stdout, stderr, .. } | Error::CalledProcess { stdout, stderr, .. } => (stdout, stderr),
             _ => (&[], &[]),
         }
+    }
+}
+
+/// Python class name for an `io::Error`.
+pub fn io_error_name(error: &io::Error) -> String {
+    match error.raw_os_error() {
+        Some(n) => os_error_name(n).to_string(),
+        None => match error.kind() {
+            io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => "TimeoutError".into(),
+            io::ErrorKind::NotFound => "FileNotFoundError".into(),
+            io::ErrorKind::BrokenPipe => "BrokenPipeError".into(),
+            io::ErrorKind::InvalidData => "ValueError".into(),
+            _ => "OSError".into(),
+        },
     }
 }
 
@@ -192,16 +197,7 @@ impl ErrorType for Error {
 
 impl ErrorType for io::Error {
     fn error_type(&self) -> String {
-        Error::Os(io::Error::new(self.kind(), "")).type_name_for(self)
-    }
-}
-
-impl Error {
-    fn type_name_for(&self, original: &io::Error) -> String {
-        match original.raw_os_error() {
-            Some(n) => os_error_name(n).to_string(),
-            None => self.type_name(),
-        }
+        io_error_name(self)
     }
 }
 

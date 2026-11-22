@@ -17,8 +17,8 @@ MAX_FILE_BYTES = 2 * 1024 * 1024
 MAX_TOTAL_BYTES = 16 * 1024 * 1024
 FORBIDDEN = {'docs/active.json', 'docs/ACTIVE-WORK.json', 'config/local.json'}
 ROOT_FILES = {'README.md', 'NOTICE.md', 'LICENSE', 'VERSION', 'CHANGELOG.md', 'CONTRIBUTING.md', 'SECURITY.md', 'Makefile', '.gitignore'}
-SOURCE_DIRECTORIES = {'src', 'scripts', 'tests', 'docs', 'config', '.github'}
-SOURCE_SUFFIXES = {'.py', '.m', '.c', '.h', '.swift', '.rs', '.md', '.json', '.plist', '.yml'}
+SOURCE_DIRECTORIES = {'src', 'scripts', 'tests', 'docs', 'config', '.github', 'rust'}
+SOURCE_SUFFIXES = {'.py', '.m', '.c', '.h', '.swift', '.rs', '.md', '.json', '.plist', '.yml', '.toml', '.lock'}
 
 
 def validate_png(data, name):

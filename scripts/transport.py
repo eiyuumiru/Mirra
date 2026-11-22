@@ -18,7 +18,7 @@ TRANSPORT_ERRORS = {'endpoint_reply_timeout', 'endpoint_write_timeout', 'endpoin
                     'endpoint_disconnected', 'endpoint_unavailable', 'endpoint_invalid_reply',
                     'endpoint_reply_too_large', 'endpoint_io_error'}
 ENDPOINT_OPERATIONS = {'generate', 'validate', 'sign_remote', 'session_signed', 'step',
-                       'token', 'confirm', 'setup', 'reset', 'get_state', 'drop', 'exit'}
+                       'token', 'confirm', 'setup', 'reset', 'get_state', 'drop', 'exit', 'forget'}
 GREETING_ERRORS = {'required_keystore_symbols_unavailable', 'keystore_library_unavailable',
                    'device_certificate_unavailable'}
 CONNECTION_ERRORS = {'bridge_pairing_missing', 'bridge_tls_unavailable', 'bridge_unreachable',

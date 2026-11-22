@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import subprocess
 
 MINIMUM_MACOS = '15.0'
@@ -25,14 +26,22 @@ def swift_flags(sdk=None):
     return ['-target', target, '-sdk', sdk]
 
 
-def build_rust(source, output, sdk=None):
+def build_rust(manifest, output, sdk=None):
+    """Build the mirra-cli binary of the Rust workspace at `manifest` and copy it to `output`."""
     _, _, _, sdk, _ = compiler_flags(sdk)
-    env = {**os.environ, 'SDKROOT': sdk, 'MACOSX_DEPLOYMENT_TARGET': MINIMUM_MACOS}
-    # This compiler runs inside the Python recipe without make's jobserver descriptors.
-    env.pop('MAKEFLAGS', None)
-    env.pop('MFLAGS', None)
-    subprocess.run(['rustc', '--edition=2021', '--target', ARCHITECTURE + '-apple-darwin',
-                    '-D', 'warnings', '-O', str(source), '-o', str(output)], env=env, check=True)
+    manifest = Path(manifest).resolve()
+    target_dir = manifest.parent / 'target'
+    triple = ARCHITECTURE + '-apple-darwin'
+    env = {**os.environ, 'SDKROOT': sdk, 'MACOSX_DEPLOYMENT_TARGET': MINIMUM_MACOS, 'CARGO_TARGET_DIR': str(target_dir)}
+    # Cargo runs inside the Python recipe without make's jobserver descriptors.
+    for name in ('MAKEFLAGS', 'MFLAGS', 'CARGO_MAKEFLAGS'):
+        env.pop(name, None)
+    subprocess.run(['cargo', 'build', '--release', '--locked', '--manifest-path', str(manifest),
+                    '-p', 'mirra-cli', '--target', triple], env=env, check=True)
+    built = target_dir / triple / 'release' / 'mirra-cli'
+    verify_macos_binary(built)
+    shutil.copyfile(built, output)
+    os.chmod(output, 0o755)
 
 
 def version(value):
@@ -89,7 +98,7 @@ def main():
     parser.add_argument('--sdk')
     parser.add_argument('--flags', action='store_true')
     parser.add_argument('--swift-flags', action='store_true')
-    parser.add_argument('--build-rust', nargs=2, metavar=('SOURCE', 'OUTPUT'))
+    parser.add_argument('--build-rust', nargs=2, metavar=('MANIFEST', 'OUTPUT'))
     parser.add_argument('--stamp', type=Path)
     parser.add_argument('--app', type=Path)
     args = parser.parse_args()

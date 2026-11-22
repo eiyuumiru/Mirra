@@ -9,10 +9,6 @@ name = "mirra-cli"
 path = "src/main.rs"
 
 [dependencies]
-serde_json.workspace = true
-libc.workspace = true
-mirra-core.workspace = true
-mirra-bridge.workspace = true
 mirra-keystore.workspace = true
 mirra-native.workspace = true
 mirra-service.workspace = true

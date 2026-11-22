@@ -300,7 +300,6 @@ dependencies = [
  "mirra-core",
  "openssl",
  "regex",
- "serde",
  "serde_json",
  "sha2",
  "tempfile",
@@ -310,26 +309,19 @@ dependencies = [
 name = "mirra-cli"
 version = "0.1.3"
 dependencies = [
- "libc",
- "mirra-bridge",
- "mirra-core",
  "mirra-keystore",
  "mirra-native",
  "mirra-service",
- "serde_json",
 ]
 
 [[package]]
 name = "mirra-core"
 version = "0.1.3"
 dependencies = [
- "base64",
  "chrono",
  "libc",
  "regex",
- "serde",
  "serde_json",
- "sha2",
  "tempfile",
 ]
 
@@ -343,7 +335,6 @@ dependencies = [
  "mirra-bridge",
  "mirra-core",
  "regex",
- "serde",
  "serde_json",
  "sha2",
  "tempfile",
@@ -356,11 +347,8 @@ dependencies = [
  "base64",
  "chrono",
  "libc",
- "mirra-bridge",
  "mirra-core",
- "mirra-keystore",
  "regex",
- "serde",
  "serde_json",
  "sha2",
  "tempfile",
@@ -378,7 +366,6 @@ dependencies = [
  "mirra-keystore",
  "mirra-native",
  "regex",
- "serde",
  "serde_json",
  "sha2",
  "tempfile",
@@ -537,7 +524,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba"
 dependencies = [
  "serde_core",
- "serde_derive",
 ]
 
 [[package]]

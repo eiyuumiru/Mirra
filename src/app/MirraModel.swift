@@ -192,6 +192,13 @@ final class MirraModel: ObservableObject {
         await control("stop")
     }
 
+    /// Forget the saved iPhone Mirroring pairing so the next connection pairs from scratch.
+    func resetMirroring() async {
+        guard !busy else { return }
+        pendingConnect = false
+        await control("reset")
+    }
+
     func importProfile(_ url: URL) async { await control("install", profile: url) }
 
     private func continueConnection() async {
@@ -220,6 +227,9 @@ final class MirraModel: ObservableObject {
             }
             if action == "renew" {
                 notice = Notice(title: "Bridge Certificate", message: reply.message ?? reply.report.detail)
+            }
+            if action == "reset" {
+                notice = Notice(title: "iPhone Mirroring Reset", message: reply.message ?? reply.report.detail)
             }
             if action == "preflight" {
                 if reply.preflight?.state == "ready" && report.state == "ready" {

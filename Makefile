@@ -42,9 +42,15 @@ package: app
 app: build endpoint $(BUILD)/sockets.dylib $(BUILD)/launch.dylib $(BUILD)/decoder-route.dylib $(BUILD)/Mirra $(BUILD)/mirra-cli
 	python3 scripts/bundle.py
 
-$(BUILD)/mirra-cli: src/cli/main.rs scripts/deployment.py $(BUILD)/.host-target | $(BUILD)/.dir
-	python3 scripts/deployment.py --build-rust "$<" "$@" --sdk "$(SDK)"
-	codesign --force --sign - "$@"
+# The background service binary: the Rust workspace's mirra-cli package, built
+# by cargo for the shipped target (CARGO_TARGET_DIR=rust/target).
+RUST_SOURCES := $(shell find rust/crates -name '*.rs' -o -name Cargo.toml) rust/Cargo.toml rust/Cargo.lock
+
+$(BUILD)/mirra-cli: $(RUST_SOURCES) scripts/deployment.py $(BUILD)/.host-target | $(BUILD)/.dir
+	python3 scripts/deployment.py --build-rust rust/Cargo.toml "$@" --sdk "$(SDK)"
+	# A stable identifier keeps the Local Network permission across rebuilds;
+	# ad-hoc identifiers otherwise embed the per-build Mach-O UUID.
+	codesign --force --sign - --identifier local.mirra.cli "$@"
 
 $(BUILD)/authorization.o: $(APP_SUPPORT)/authorization.m $(APP_AUTH) $(BUILD)/.host-target | $(BUILD)/.dir
 	xcrun clang $(HOST_FLAGS) -fobjc-arc -fblocks -Wall -Wextra -Werror -c "$<" -o "$@"

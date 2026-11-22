@@ -895,6 +895,10 @@ static void close_bridge_session(NSMutableDictionary *bridge, const KeyStore *st
     [bridge removeObjectForKey:@"connection"];
 }
 
+// Defined with the network service: a saved Mac's record and the Settings entry.
+static NSString *client_path(NSString *client);
+static void publish_preferences(void);
+
 static NSDictionary *bridge_request(NSMutableDictionary *bridge, const KeyStore *store,
                                     NSDictionary *request, BOOL *close) {
     KeyStore keys = *store;
@@ -919,6 +923,20 @@ static NSDictionary *bridge_request(NSMutableDictionary *bridge, const KeyStore 
             NSDictionary *generated = generate_identity(&keys, dcrt, attested, key_class, identities);
             if ([generated[@"status"] intValue] == 0 && generated[@"identity"]) persist_client(bridge, store);
             return generated;
+        }
+        if ([operation isEqual:@"forget"]) {
+            // Reset: drop this Mac's saved keys, pairing sessions and record so
+            // iPhone Mirroring pairs from scratch. Other saved Macs are untouched.
+            // Closing the forgotten session resets its AKS sessions and unloads
+            // its keybags instead of keeping them for a reconnect.
+            NSString *client = bridge[@"client"];
+            if (!client) return @{@"error": @"client_not_saved"};
+            bridge[@"forgotten"] = @YES;
+            [client_states removeObjectForKey:client];
+            BOOL removed = unlink(client_path(client).fileSystemRepresentation) == 0 || errno == ENOENT;
+            publish_preferences();
+            *close = YES;
+            return removed ? @{@"status": @0, @"forgotten": @YES} : @{@"error": @"client_record_not_removed"};
         }
         if ([operation isEqual:@"identities"]) {
             // Keys restored for this Mac, so its broker recognizes sharingd's saved keys.
