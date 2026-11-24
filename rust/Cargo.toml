@@ -4,7 +4,7 @@ members = ["crates/core", "crates/bridge", "crates/keystore", "crates/native", "
 
 [workspace.package]
 edition = "2021"
-version = "0.1.3"
+version = "0.2.0"
 publish = false
 
 [workspace.dependencies]

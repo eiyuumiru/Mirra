@@ -10,7 +10,7 @@ A native macOS companion for Apple's iPhone Mirroring on Hackintosh.
 
 [Get started](#get-started) · [Compatibility](#compatibility) · [Screenshots](#screenshots) · [Build](#build-from-source) · [Documentation](#documentation)
 
-**Experimental · v0.1.3 · Intel-based Macs**
+**Experimental · v0.2.0 · Intel-based Macs**
 
 <p>
   <a href="https://ko-fi.com/eiyuumiru"><img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Support Mirra on Ko-fi"></a>
@@ -38,7 +38,7 @@ software, drivers and network conditions. Updates may break functionality.
 
 ## Features
 
-- Guided bridge setup with verified SSH access and automatic certificate preparation.
+- Guided bridge pairing by token, with verified SSH setup for a new bridge.
 - Background support with recovery after bridge connection failures.
 - Connection checks before opening iPhone Mirroring.
 - Native error dialogs with optional logs.
@@ -49,14 +49,15 @@ software, drivers and network conditions. Updates may break functionality.
 
 ```mermaid
 flowchart LR
-    A[Mirra] -->|SSH over Wi-Fi or USB| B[Jailbroken bridge iPhone]
+    A[Mirra] -->|Paired bridge service over Wi-Fi or USB| B[Jailbroken bridge iPhone]
     B -->|Cryptographic operations| A
     A --> C[Apple's iPhone Mirroring]
     C <-->|Screen and input| D[Your iPhone]
 ```
 
 The bridge and the iPhone you mirror are separate devices. Apple's account,
-pairing and authentication requirements still apply.
+pairing and authentication requirements still apply. SSH installs or updates the
+bridge service; paired sessions use its authenticated TLS connection.
 
 ## Get started
 
@@ -129,8 +130,8 @@ for technical details.
 
 ## Build from source
 
-Use Python 3.9 or later, Apple's Command Line Tools and SDKs with the required
-framework stubs. See [Building](docs/Build.md) for requirements and checks.
+Use Python 3.9 or later, Rust with Cargo, and Apple's Command Line Tools and SDKs
+with the required framework stubs. See [Building](docs/Build.md) for requirements and checks.
 
 ```sh
 make app
@@ -151,7 +152,7 @@ GitHub's **Source code** downloads provide the source for each tagged release.
 | Problem | What to check |
 | --- | --- |
 | SIP fully enabled | Use disabled or compatible partially enabled SIP; see [Installation](docs/Installation.md#system-integrity-protection-sip) |
-| Waiting for the bridge | Jailbreak, SSH access and the selected Wi-Fi address or USB device |
+| Waiting for the bridge | Active jailbreak, bridge service and the selected Wi-Fi address or USB device |
 | iPhone not found | Target lock state, proximity, Wi-Fi, Bluetooth and Apple Account |
 | Bridge ready but Mirroring fails | Apple's connection error and logs from the same attempt |
 | Blank or interrupted video | Wi-Fi/AWDL, decoder logs and [decoder compatibility](docs/Decoder.md) |
