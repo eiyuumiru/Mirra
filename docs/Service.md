@@ -117,6 +117,11 @@ Without `--config`, replacement preserves the installed profile and credentials.
 Add `--config PATH` to select another bridge. Cleanup must finish before replacement.
 The previous package is archived for rollback.
 
+Installations from before service pairing need a paired bridge profile from Setup
+before updating. Mirra preserves their existing support and credentials. It also
+checks that the selected pairing token and certificate exist and contain data
+before stopping support or preparing a replacement package.
+
 Transport changes update the owned launch definition atomically. Conflicting
 or unfamiliar jobs are not overwritten. Previous packages are retained until
 removed explicitly.

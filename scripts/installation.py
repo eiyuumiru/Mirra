@@ -170,6 +170,7 @@ class NativeService:
             with activity.operation('Service', 'check updated support'):
                 self.validate_source()
             config = load_config(self.package / 'config.json')
+            self.validate_saved_bridge(config)
             if self.plist.exists() or self.plist.is_symlink():
                 self.private_file(self.plist)
                 recognized = [self.definition(config, manifest=manifest), *self.previous_definitions(config, manifest)]
@@ -284,24 +285,50 @@ class NativeService:
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
             raise RuntimeError('Expected a private, user-owned support file: ' + str(path))
 
+    @staticmethod
+    def validate_credentials(config):
+        for attribute in ('token_file', 'certificate_file'):
+            source = getattr(config, attribute)
+            if not source.is_file() or not source.stat().st_size:
+                raise RuntimeError('Backend provisioning is incomplete: ' + attribute)
+
+    @classmethod
+    def validate_saved_bridge(cls, config):
+        # SSH-era profiles have no service token. Never borrow a repository
+        # default for another bridge when replacing an installed package.
+        saved = json.loads(config.source.read_text())
+        if not saved.get('backend', {}).get('service', {}).get('token_file'):
+            raise RuntimeError('Pair with the Mirra Bridge service in Setup before updating this SSH-era installation; existing support was preserved')
+        cls.validate_credentials(config)
+
     def prepare(self, config=None, replace_package=False):
         os.umask(0o077)
         self.base.mkdir(parents=True, exist_ok=True, mode=0o700)
         if self.base.stat().st_uid != os.getuid() or self.base.stat().st_mode & 0o077:
             raise RuntimeError('Native support installation directory is not private')
         previous_definition = None
+        using_saved = config is None
         if self.package.exists():
             installed_manifest = self.validate_package()
             if not replace_package:
                 return {'package': str(self.package), 'already_prepared': True}
             if self.registration():
                 raise RuntimeError('Stop the service before replacing its package')
+        if config is None:
+            # Updating source must not reset a working bridge to repo defaults.
+            config = load_config(self.package / 'config.json' if self.package.exists() else None)
+        self.validate_source()
+        if using_saved and self.package.exists():
+            self.validate_saved_bridge(config)
+        else:
+            self.validate_credentials(config)
+        if self.package.exists():
             # A new adapter, or a different bridge, needs Apple's sharingd back
             # first. An update that ships the identical adapter keeps the detached
             # one: a new sharingd process makes the iPhone ask for its passcode.
             from sharingd import SharingdAgent
             adapter = self.source / 'build' / 'keystore.dylib'
-            keep_sharingd = (config is None and adapter.is_file()
+            keep_sharingd = (using_saved and adapter.is_file()
                              and SharingdAgent.detached_matches(hashlib.sha256(adapter.read_bytes()).hexdigest()))
             if keep_sharingd:
                 activity.emit('Service', 'kept detached sharingd for update; adapter unchanged')
@@ -331,10 +358,6 @@ class NativeService:
                     continue
                 if journal.exists():
                     raise RuntimeError('Finish native session cleanup before replacing the package')
-        if config is None:
-            # Updating source must not reset a working bridge to repo defaults.
-            config = load_config(self.package / 'config.json' if self.package.exists() else None)
-        self.validate_source()
         staging = Path(tempfile.mkdtemp(prefix='.package-', dir=self.base))
         files = []
         for source in sorted((self.source / 'scripts').glob('*.py')):

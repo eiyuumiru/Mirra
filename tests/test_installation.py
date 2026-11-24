@@ -263,7 +263,7 @@ class NativeServiceTests(unittest.TestCase):
         self.prepare()
         previous = load_config(self.service.package / 'config.json')
         credentials = {name: getattr(previous, name).read_bytes() for name in
-                       ('identity_file', 'user_file', 'known_hosts_file', 'certificate_file')}
+                       ('identity_file', 'user_file', 'known_hosts_file', 'certificate_file', 'token_file')}
         (self.source / 'scripts/native.py').write_text('print("updated fixture")\n')
         with patch.object(self.service, 'registration', return_value={}), \
                 patch('installation.subprocess.run', return_value=subprocess.CompletedProcess([], 0)):
@@ -295,7 +295,7 @@ class NativeServiceTests(unittest.TestCase):
         self.assertTrue(self.service.needs_update())
         previous = load_config(self.service.package / 'config.json')
         credentials = {name: getattr(previous, name).read_bytes() for name in
-                       ('identity_file', 'user_file', 'known_hosts_file', 'certificate_file')}
+                       ('identity_file', 'user_file', 'known_hosts_file', 'certificate_file', 'token_file')}
         self.install_plist(self.service.definition(previous, manifest=legacy))
         with patch.object(self.service, 'registration', return_value={}), \
              patch.object(self.service, 'stop', return_value={}) as stop, \
@@ -309,6 +309,112 @@ class NativeServiceTests(unittest.TestCase):
         for name, data in credentials.items():
             self.assertEqual(getattr(current, name).read_bytes(), data)
         self.assertTrue((self.service.package / 'build/decoder-route.dylib').is_file())
+
+    def assert_ssh_era_update_is_preserved(self, revision):
+        self.prepare()
+        path = self.service.package / 'manifest.json'
+        manifest = json.loads(path.read_text())
+        if revision is None:
+            manifest['schema_version'] = 4
+            manifest.pop('support_revision')
+        else:
+            manifest['support_revision'] = revision
+        for name in ('build/' + CLI_NAME, *BRIDGE_UPDATE_FILES, 'private/token'):
+            manifest['files'].pop(name)
+            (self.service.package / name).unlink()
+        profile = self.service.package / 'config.json'
+        saved = json.loads(profile.read_text())
+        saved['backend'].pop('service')
+        write_state(profile, saved)
+        manifest['files']['config.json'] = hashlib.sha256(profile.read_bytes()).hexdigest()
+        write_state(path, manifest)
+        configured = load_config(profile, root=self.source)
+        self.assertTrue(configured.token_file.is_file())  # Another profile's default must not be used.
+        self.service.validate_package()
+        self.install_plist(self.service.definition(configured, manifest=manifest))
+        before = {file: file.read_bytes() for file in self.service.package.rglob('*') if file.is_file()}
+        previous = self.service.plist.read_bytes()
+        with patch.object(self.service, 'stop') as stop, \
+                patch.object(self.service, 'prepare') as prepare, \
+                patch.object(self.service, 'install') as install, \
+                patch('installation.load_config', side_effect=lambda path: load_config(path, root=self.source)), \
+                patch('installation.subprocess.run', return_value=subprocess.CompletedProcess([], 0)):
+            with self.assertRaisesRegex(RuntimeError, 'SSH-era installation'):
+                self.service.update_saved()
+        stop.assert_not_called()
+        prepare.assert_not_called()
+        install.assert_not_called()
+        self.assertEqual(self.service.plist.read_bytes(), previous)
+        self.assertEqual({file: file.read_bytes() for file in self.service.package.rglob('*') if file.is_file()}, before)
+        self.assertEqual(list(self.service.base.glob('previous-*')), [])
+        with patch.object(self.service, 'registration', return_value={}), \
+                patch('sharingd.SharingdAgent.restore_detached') as restore, \
+                patch('installation.load_config', side_effect=lambda path: load_config(path, root=self.source)), \
+                patch('installation.subprocess.run', return_value=subprocess.CompletedProcess([], 0)):
+            with self.assertRaisesRegex(RuntimeError, 'SSH-era installation'):
+                self.service.prepare(replace_package=True)
+        restore.assert_not_called()
+        self.assertEqual({file: file.read_bytes() for file in self.service.package.rglob('*') if file.is_file()}, before)
+
+    def test_token_free_legacy_package_preserves_existing_support(self):
+        self.assert_ssh_era_update_is_preserved(None)
+
+    def test_token_free_revision27_package_preserves_existing_support(self):
+        self.assert_ssh_era_update_is_preserved(27)
+
+    def test_missing_replacement_credentials_preserve_package_and_sharingd(self):
+        self.prepare()
+        before = (self.service.package / 'manifest.json').read_bytes()
+        for attribute in ('token_file', 'certificate_file'):
+            for exists in (False, True):
+                with self.subTest(attribute=attribute, empty=exists):
+                    candidate = self.root / (attribute + ('-empty' if exists else '-missing'))
+                    if exists:
+                        candidate.touch()
+                    replacement = replace(self.config, **{attribute: candidate})
+                    with patch.object(self.service, 'registration', return_value={}), \
+                            patch('sharingd.SharingdAgent.restore_detached') as restore, \
+                            patch('installation.subprocess.run', return_value=subprocess.CompletedProcess([], 0)):
+                        with self.assertRaisesRegex(RuntimeError, attribute):
+                            self.service.prepare(replacement, replace_package=True)
+                    restore.assert_not_called()
+                    self.assertEqual((self.service.package / 'manifest.json').read_bytes(), before)
+                    self.assertEqual(list(self.service.base.glob('previous-*')), [])
+                    self.assertEqual(list(self.service.base.glob('.package-*')), [])
+
+    def test_missing_saved_credentials_do_not_stop_or_replace_support(self):
+        self.prepare()
+        profile = self.service.package / 'config.json'
+        original = json.loads(profile.read_text())
+        path = self.service.package / 'manifest.json'
+        manifest = json.loads(path.read_text())
+        manifest['support_revision'] = SUPPORT_REVISION - 1
+        for attribute in ('token_file', 'certificate_file'):
+            for exists in (False, True):
+                with self.subTest(attribute=attribute, empty=exists):
+                    candidate = self.root / (attribute + ('-empty' if exists else '-missing'))
+                    if exists:
+                        candidate.touch()
+                    saved = json.loads(json.dumps(original))
+                    if attribute == 'token_file':
+                        saved['backend']['service']['token_file'] = str(candidate)
+                    else:
+                        saved['backend']['certificate_file'] = str(candidate)
+                    write_state(profile, saved)
+                    manifest['files']['config.json'] = hashlib.sha256(profile.read_bytes()).hexdigest()
+                    write_state(path, manifest)
+                    before = path.read_bytes()
+                    with patch.object(self.service, 'stop') as stop, \
+                            patch.object(self.service, 'prepare') as prepare, \
+                            patch.object(self.service, 'install') as install, \
+                            patch('installation.subprocess.run', return_value=subprocess.CompletedProcess([], 0)):
+                        with self.assertRaisesRegex(RuntimeError, attribute):
+                            self.service.update_saved()
+                    stop.assert_not_called()
+                    prepare.assert_not_called()
+                    install.assert_not_called()
+                    self.assertEqual(path.read_bytes(), before)
+                    self.assertEqual(list(self.service.base.glob('previous-*')), [])
 
     def test_incomplete_update_preserves_running_old_package(self):
         self.legacy_package()
@@ -696,7 +802,8 @@ class NativeServiceTests(unittest.TestCase):
         birth = [42, os.getuid(), 100, 1]
         write_state(self.service.state, {'supervisor_birth': birth})
         with patch.object(self.service, 'registration', return_value={}), \
-             patch('installation.process_birth', return_value=tuple(birth)):
+             patch('installation.process_birth', return_value=tuple(birth)), \
+             patch('installation.subprocess.run', return_value=subprocess.CompletedProcess([], 0)):
             with self.assertRaisesRegex(RuntimeError, 'Wait for native support cleanup'):
                 self.service.prepare(replace_package=True)
 
