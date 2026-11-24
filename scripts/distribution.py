@@ -87,8 +87,7 @@ def checked_name(name):
             or path.parts[0].startswith('.') and path.parts[0] not in ('.github', '.gitignore')):
         raise ValueError('Source path is not distributable: ' + name)
     image = len(path.parts) == 3 and path.parts[:2] == ('docs', 'images') and path.suffix == '.png'
-    legacy = len(path.parts) == 3 and path.parts[:2] in (('old', 'app'), ('old', 'tests')) and path.suffix in ('.m', '.h')
-    if name not in ROOT_FILES and not image and not legacy and (len(path.parts) < 2
+    if name not in ROOT_FILES and not image and (len(path.parts) < 2
             or path.parts[0] not in SOURCE_DIRECTORIES or path.suffix not in SOURCE_SUFFIXES):
         raise ValueError('Source path is outside the export policy: ' + name)
     return path

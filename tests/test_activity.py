@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from activity import capture, FileLog, run, poll_errors
+from activity import capture, emit, FileLog, run, poll_errors
 from redaction import redact_line, redact_text
 from transport import Endpoint
 from logfiles import migrate_legacy
@@ -168,13 +168,10 @@ for line in sys.stdin:
         self.assertEqual(folder.stat().st_mode & 0o777, 0o700)
         self.assertEqual(log.path.stat().st_mode & 0o777, 0o600)
 
-    def test_ui_event_helper_saves_real_message_with_credentials_redacted(self):
+    def test_activity_saves_real_message_with_credentials_redacted(self):
         folder = self.root / 'Mirra/logs'
-        script = Path(__file__).resolve().parents[1] / 'scripts/event.py'
-        result = subprocess.run([sys.executable, '-B', str(script), '--base', str(folder)],
-            input=json.dumps({'source':'Mirra','level':'error','message':'real failure 42 token=fixture-token',
-                              'password':'fixture-password'}).encode(), capture_output=True, timeout=3)
-        self.assertEqual(result.returncode, 0, result.stderr)
+        with capture(FileLog(folder, name='app.log')):
+            emit('Mirra', 'real failure 42 token=fixture-token', 'error', password='fixture-password')
         saved = json.loads((folder / ('app-' + date.today().isoformat() + '.log')).read_text())
         self.assertIn('real failure 42', saved['message'])
         self.assertIn('timestamp', saved)
@@ -234,16 +231,14 @@ for line in sys.stdin:
         self.assertEqual(log.maintain(), ['native-2026-11-02.log'])
         self.assertFalse(path.exists())
 
-    def test_app_event_startup_performs_expiration_without_touching_other_files(self):
+    def test_first_activity_performs_expiration_without_touching_other_files(self):
         folder=self.root/'logs';folder.mkdir(mode=0o700)
         old=folder/('native-' + (date.today()-timedelta(days=8)).isoformat() + '.log')
         old.write_text('expiration fixture');old.chmod(0o600)
         legacy=folder/'setup.log';legacy.write_text('earlier SSH output\n');legacy.chmod(0o600)
         other=folder/'keep.txt';other.write_text('owner file')
-        script=Path(__file__).resolve().parents[1]/'scripts/event.py'
-        result=subprocess.run([sys.executable,'-B',str(script),'--base',str(folder)],
-            input=b'{"source":"Mirra","message":"capture started"}',capture_output=True,timeout=3)
-        self.assertEqual(result.returncode,0,result.stderr)
+        with capture(FileLog(folder, name='app.log')):
+            emit('Mirra', 'capture started')
         self.assertFalse(old.exists())
         self.assertEqual(other.read_text(),'owner file')
         self.assertTrue((folder/('app-' + date.today().isoformat() + '.log')).is_file())

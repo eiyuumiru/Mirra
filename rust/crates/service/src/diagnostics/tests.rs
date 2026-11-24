@@ -263,13 +263,3 @@ fn iso_timestamps_follow_python_fromisoformat() {
     assert!(iso_timestamp("2026-11-08 04:00:00").is_some());
     assert_eq!(iso_timestamp("not a date"), None);
 }
-
-/// Byte comparison with `scripts/diagnostics.py`: set `MIRRA_DIAGNOSTICS_COMPARE`
-/// to a fixture base; the Rust reply is written next to it as `rust.json`.
-#[test]
-fn writes_a_reply_for_python_comparison_when_requested() {
-    let Some(base) = std::env::var_os("MIRRA_DIAGNOSTICS_COMPARE") else { return };
-    let base = PathBuf::from(base);
-    let reply = collect(Some(&base), &json!({}));
-    std::fs::write(base.parent().unwrap().join("rust.json"), pyjson::dumps_unicode(&reply)).unwrap();
-}

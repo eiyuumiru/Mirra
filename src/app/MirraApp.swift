@@ -62,7 +62,7 @@ final class MirraApplication: NSObject, NSApplicationDelegate, NSWindowDelegate 
         guard let process = try? SupportClient.process(.main, "logstream", arguments: arguments) else { return }
         let input = Pipe()
         process.standardInput = input
-        // The reader also persists its redacted entries for diagnostics.py.
+        // The reader also persists its redacted entries for the diagnostics viewer.
         process.standardOutput = FileHandle.nullDevice
         do {
             try process.run()

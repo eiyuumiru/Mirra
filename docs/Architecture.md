@@ -6,12 +6,12 @@
 | --- | --- |
 | `src/app/` | SwiftUI interface, native app window, and setup and service controls |
 | `src/app-support/` | App artwork and secure SSH password helper |
-| `src/cli/` | Rust entry point used by the app and the login service |
-| `old/app/` | Previous Objective-C interface archived for reference |
+| `rust/crates/cli/` | Rust entry point used by the app and the login service |
+| `rust/crates/` | Core, bridge, keystore, native and service implementations |
 | `src/mirroring/` | Media, keystore, launch, socket and decoder adapters |
 | `src/phone/` | Bridge endpoint for AppleKeyStore and Secure Enclave operations |
 | `src/tools/` | Host compatibility and capability inspection |
-| `scripts/` | Setup, transport, broker, lifecycle, build and packaging |
+| `scripts/` | Setup and installation, shared setup dependencies, developer tools, build and packaging |
 | `tests/` | Python regression tests and native checks |
 
 ## Runtime flow
@@ -19,7 +19,7 @@
 ```mermaid
 flowchart TD
     A[sharingd and keystore adapter] --> B[Authenticated local broker]
-    B -->|SSH over Wi-Fi or USB| C[Bridge endpoint]
+    B -->|TLS-PSK / WebSocket over Wi-Fi or USB| C[Persistent bridge endpoint]
     C --> D[AppleKeyStore / Secure Enclave]
     E[Apple's iPhone Mirroring and media adapter] <-->|Rapport / AWDL| F[Target iPhone]
 ```
@@ -32,10 +32,11 @@ in place.
 
 ## Broker and endpoint
 
-`keystore.m` interposes AKS/DCRT calls. `broker.py` exposes a private Unix socket
-and an authenticated loopback socket. `transport.py` launches the provisioned
-endpoint through verified SSH. `keystore.py` manages identity caching and maps
-virtual session IDs to endpoint-owned handles.
+`keystore.m` interposes AKS/DCRT calls. The Rust keystore crate exposes a private
+Unix socket and an authenticated loopback socket, manages identity caching and
+maps virtual session IDs to endpoint-owned handles. The Rust bridge crate connects
+to the persistent phone service using TLS-PSK and WebSocket. SSH is used to install
+or update that service. Python setup retains its own bridge client.
 
 Keys use isolated endpoint keybags. Session IDs increase for the broker's
 lifetime and are not reused for another handle. The wire adapter preserves the
@@ -52,20 +53,22 @@ Memory-exhaustion recovery retries session creation after successful cleanup.
 The shim still calls the native Mac reset operation and reports incomplete
 bridge cleanup to its controller.
 
-`health.py` tracks the same process and socket throughout the session. A terminal
+The Rust bridge health observer tracks the same process and socket throughout the session. A terminal
 process result or repeated explicit unhealthy replies triggers recovery. Timeouts,
 missing sockets and malformed observations remain unknown and are retried.
 
-`backend.py` owns broker workers and the sharingd controller. `sharing.py` installs
-a temporary per-user launch configuration and restores Apple's registration on
-exit. Ownership records and process birth times prevent recovery from replacing
-an unrelated job.
+The Rust service owns broker workers and the sharingd controller. The Rust
+keystore crate manages the injected sharingd process and its ownership journal.
+Normal shutdown detaches a verified injected process for later adoption; process
+birth identities and ownership records guard cleanup and recovery.
 
 ## Native startup and media
 
-`native.py` manages launch support, delegated socket binds and worker supervision.
-`launch.m` adds adapter settings only for the system iPhone Mirroring app.
-`supervisor.py` retries failed backend workers after verified cleanup.
+The Rust native and service crates manage launch support, delegated socket binds
+and worker supervision. `launch.m` adds adapter settings only for the system
+iPhone Mirroring app. The Rust supervisor retries failed backend workers after
+verified cleanup. Python setup and installation still import shared lifecycle
+helpers to inspect and migrate installed support.
 
 `media.m` and `profile.m` implement the AWDL profile. Compatibility checks run
 before hooks load. H.264 decoding uses the installed VideoToolbox implementation,
