@@ -26,10 +26,6 @@ $(BUILD)/launch.dylib: src/mirroring/launch.m $(BUILD)/.host-target | $(BUILD)/.
 	xcrun clang $(HOST_FLAGS) -dynamiclib -fobjc-arc -fblocks -Wall -Wextra -Werror -framework Foundation "$<" -o "$@"
 	codesign --force --sign - "$@"
 
-$(BUILD)/marker.dylib: tests/marker.c $(BUILD)/.host-target | $(BUILD)/.dir
-	xcrun clang $(HOST_FLAGS) -dynamiclib -Wall -Wextra -Werror "$<" -o "$@"
-	codesign --force --sign - "$@"
-
 $(BUILD)/capabilities: src/tools/capabilities.m $(BUILD)/.host-target | $(BUILD)/.dir
 	xcrun clang $(HOST_FLAGS) -fobjc-arc -Wall -Wextra -Werror -framework Foundation "$<" -o "$@"
 

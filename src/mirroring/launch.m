@@ -32,7 +32,7 @@ static void prepareContext(id request) {
     if (!data || data.length > 16384) return;
     id settings = [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL];
     if (![settings isKindOfClass:NSDictionary.class] || ![settings count]) return;
-    NSSet *allowed = [NSSet setWithArray:@[@"DYLD_INSERT_LIBRARIES", @"MIRRA_BIND_SOCKET", @"MIRRA_LAUNCH_PROBE"]];
+    NSSet *allowed = [NSSet setWithArray:@[@"DYLD_INSERT_LIBRARIES", @"MIRRA_BIND_SOCKET"]];
     for (id key in settings) {
         id value = settings[key];
         if (![allowed containsObject:key] || ![value isKindOfClass:NSString.class] ||

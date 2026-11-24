@@ -500,7 +500,7 @@ mod tests {
             ..LaunchContext::default()
         };
         let mut environment = Map::new();
-        environment.insert("MIRRA_LAUNCH_PROBE".into(), Value::from("test"));
+        environment.insert("DYLD_INSERT_LIBRARIES".into(), Value::from("/fixture/keystore.dylib"));
         let agent = NativeLaunchAgent::with_context(&run, environment, None, None, context);
         Fixture { _temp: temp, root, run, original, fake, agent }
     }
@@ -533,7 +533,7 @@ mod tests {
         assert_eq!(definition.get("Umask"), Some(&Plist::Integer(63)));
         let environment = definition.get("EnvironmentVariables").unwrap();
         assert_eq!(environment.get("DYLD_INSERT_LIBRARIES").and_then(Plist::as_str), Some(util::text(&f.run.join("launch.dylib")).as_str()));
-        assert_eq!(std::fs::read_to_string(f.agent.settings.with_extension("disabled")).unwrap(), "{\"MIRRA_LAUNCH_PROBE\": \"test\"}\n");
+        assert_eq!(std::fs::read_to_string(f.agent.settings.with_extension("disabled")).unwrap(), "{\"DYLD_INSERT_LIBRARIES\": \"/fixture/keystore.dylib\"}\n");
     }
 
     #[test]
