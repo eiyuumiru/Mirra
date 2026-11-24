@@ -5,7 +5,7 @@
     "Foundation": {
       "install_name": "/System/Library/Frameworks/Foundation.framework/Foundation",
       "framework": true,
-      "symbols": ["_NSClassFromString", "_NSDefaultRunLoopMode", "_OBJC_CLASS_$_NSArray", "_OBJC_CLASS_$_NSCharacterSet", "_OBJC_CLASS_$_NSConstantArray", "_OBJC_CLASS_$_NSConstantDictionary", "_OBJC_CLASS_$_NSConstantIntegerNumber", "_OBJC_CLASS_$_NSData", "_OBJC_CLASS_$_NSDate", "_OBJC_CLASS_$_NSDictionary", "_OBJC_CLASS_$_NSFileManager", "_OBJC_CLASS_$_NSJSONSerialization", "_OBJC_CLASS_$_NSMutableArray", "_OBJC_CLASS_$_NSMutableData", "_OBJC_CLASS_$_NSMutableDictionary", "_OBJC_CLASS_$_NSMutableSet", "_OBJC_CLASS_$_NSMutableString", "_OBJC_CLASS_$_NSNumber", "_OBJC_CLASS_$_NSPropertyListSerialization", "_OBJC_CLASS_$_NSRunLoop", "_OBJC_CLASS_$_NSSortDescriptor", "_OBJC_CLASS_$_NSString", "_OBJC_CLASS_$_NSUUID"]
+      "symbols": ["_NSClassFromString", "_NSDefaultRunLoopMode", "_OBJC_CLASS_$_NSArray", "_OBJC_CLASS_$_NSCharacterSet", "_OBJC_CLASS_$_NSConstantArray", "_OBJC_CLASS_$_NSConstantDictionary", "_OBJC_CLASS_$_NSConstantIntegerNumber", "_OBJC_CLASS_$_NSData", "_OBJC_CLASS_$_NSDate", "_OBJC_CLASS_$_NSDictionary", "_OBJC_CLASS_$_NSFileManager", "_OBJC_CLASS_$_NSJSONSerialization", "_OBJC_CLASS_$_NSMutableArray", "_OBJC_CLASS_$_NSMutableData", "_OBJC_CLASS_$_NSMutableDictionary", "_OBJC_CLASS_$_NSMutableSet", "_OBJC_CLASS_$_NSMutableString", "_OBJC_CLASS_$_NSNumber", "_OBJC_CLASS_$_NSPropertyListSerialization", "_OBJC_CLASS_$_NSRunLoop", "_OBJC_CLASS_$_NSSortDescriptor", "_OBJC_CLASS_$_NSString", "_OBJC_CLASS_$_NSThread", "_OBJC_CLASS_$_NSUUID"]
     },
     "CoreFoundation": {
       "install_name": "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation",

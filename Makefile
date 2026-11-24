@@ -94,7 +94,7 @@ $(BUILD)/keystore.dylib: src/mirroring/keystore.m $(BUILD)/.host-target | $(BUIL
 	codesign --force --sign - "$@"
 
 $(BUILD)/keyprobe: tests/keystore.m src/mirroring/keystore.m $(BUILD)/.host-target | $(BUILD)/.dir
-	xcrun clang $(HOST_FLAGS) -fobjc-arc -fblocks -Wall -Wextra -O1 -F "$(SDK)/System/Library/PrivateFrameworks" -framework Foundation -framework AppleKeyStore -framework MobileActivationMacOS -L "$(SDK)/usr/lib/swift" -lswiftCore "$<" -o "$@"
+	xcrun clang $(HOST_FLAGS) -fobjc-arc -fblocks -Wall -Wextra -O1 -F "$(SDK)/System/Library/PrivateFrameworks" -framework Foundation -framework Security -framework AppleKeyStore -framework MobileActivationMacOS -L "$(SDK)/usr/lib/swift" -lswiftCore "$<" -o "$@"
 
 $(BUILD)/endpointprobe: tests/endpoint.m src/phone/endpoint.m src/phone/keystore-symbols.h src/phone/cache-symbols.h $(BUILD)/.host-target | $(BUILD)/.dir
 	xcrun clang $(HOST_FLAGS) -fobjc-arc -fblocks -Wall -Wextra -Werror -framework Foundation -framework Security -framework Network "$<" -o "$@"
