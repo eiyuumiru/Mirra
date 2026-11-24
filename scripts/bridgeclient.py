@@ -390,6 +390,14 @@ class WebSocket:
             return True
         return False
 
+    def interrupt(self):
+        """Wake an in-flight read without closing its descriptor underneath it."""
+        self.closed = True
+        try:
+            self.stream.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
     def close(self, deadline=None):
         if not self.closed:
             self.closed = True
@@ -397,6 +405,7 @@ class WebSocket:
                 _send(self.stream, self._frame(0x8, struct.pack('!H', 1000)), deadline or time.monotonic() + 1)
             except OSError:
                 pass
+        self.interrupt()
         try:
             self.stream.close()
         except OSError:

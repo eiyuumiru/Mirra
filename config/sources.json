@@ -234,6 +234,7 @@
     "tests/InterfaceChecks.swift",
     "tests/authorization.m",
     "tests/awdl-service.m",
+    "tests/bridgefixture.py",
     "tests/certificate.m",
     "tests/checkendpoint.py",
     "tests/checkkeystore.py",

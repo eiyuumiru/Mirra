@@ -181,6 +181,12 @@ class Endpoint:
             self._lock.release()
         else:
             self._failed = True
+            if self.socket is not None:
+                self.socket.interrupt()
+            # Keep the descriptor open until the interrupted reader unwinds;
+            # closing it first can leave Darwin's timed recv waiting on it.
+            if self._lock.acquire(timeout=2):
+                self._lock.release()
         self.timeout = min(self.timeout, 2)
         if self.socket is not None:
             if not self._failed and not self.socket.closed:

@@ -13,7 +13,7 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from keystore import AksBroker, SESSION_BASE
-from transport import Endpoint
+from bridgefixture import BridgeFixture
 from health import health, wait_for_backend_loss
 
 
@@ -118,17 +118,12 @@ class BackendHealthTests(unittest.TestCase):
             health(path)
 
     def test_failed_native_cleanup_reaches_watcher_with_endpoint_still_running(self):
-        # A real endpoint process still validates its key after one reset fails.
-        # The broker must retain that handle and explicitly request recovery;
-        # neither process death nor transport loss can account for this result.
-        program = '''import json,sys
-print('{"ready":true}',flush=True)
-for line in sys.stdin:
- r=json.loads(line)
- status=-7 if r['operation']=='reset' and r['session']==97 else 0
- print(json.dumps({'status':status}),flush=True)
-'''
-        with Endpoint(command=[sys.executable, '-u', '-c', program], timeout=1) as endpoint:
+        # A real WebSocket peer still validates its key after one reset fails.
+        # The broker retains ownership and requests recovery while connected.
+        def reply(request, peer):
+            return {'status': -7 if request['operation'] == 'reset' and request['session'] == 97 else 0}
+        with BridgeFixture(reply) as bridge:
+            endpoint = bridge.connect()
             broker = AksBroker(endpoint)
             broker.classes[9] = {'identity': 'fixture-only'}
             broker.sessions = {SESSION_BASE + 1: 97, SESSION_BASE + 2: 204}
@@ -139,9 +134,9 @@ for line in sys.stdin:
             timer = threading.Timer(3, stop.set)
             timer.start()
             try:
-                result = wait_for_backend_loss(endpoint.process, path, stop, 1, interval=.01)
+                result = wait_for_backend_loss(endpoint, path, stop, 1, interval=.01)
             finally:
                 timer.cancel()
             self.assertEqual(result, 'broker_reported_unhealthy')
-            self.assertIsNone(endpoint.process.poll())
+            self.assertIsNone(endpoint.poll())
             self.assertEqual(broker.sessions, {SESSION_BASE + 1: 97})

@@ -6,13 +6,12 @@ import subprocess
 import sys
 import tempfile
 import threading
-from types import SimpleNamespace
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from activity import capture, emit, FileLog, run, poll_errors
 from redaction import redact_line, redact_text
-from transport import Endpoint
+from bridgefixture import BridgeFixture
 from logfiles import migrate_legacy
 
 
@@ -101,33 +100,21 @@ print('{"certificate_exported":true,"bytes":1234}')
         self.assertTrue(any('unsupported_device: aks_ref_key_create is missing' in r['message'] for r in records))
         self.assertEqual(records[-1]['fields']['exit_code'], 17)
 
-    def test_endpoint_logging_retains_real_replies_and_captures_ssh_stderr(self):
-        command = self.script('''import json,sys
-print('{"ready":true}',flush=True)
-print('actual endpoint stderr: helper initialized',file=sys.stderr,flush=True)
-for line in sys.stdin:
- request=json.loads(line)
- print(json.dumps({'status':0,'data':'fixture-short-key','identity':'fixture-identity'}),flush=True)
- if request['operation']=='exit': break
-''')
+    def test_endpoint_logging_records_socket_replies_without_key_material(self):
         records = []
-        stderr_seen = threading.Event()
-
-        def sink(value):
-            records.append(value)
-            if 'actual endpoint stderr: helper initialized' in value['message']:
-                stderr_seen.set()
-
-        with capture(sink), Endpoint(SimpleNamespace(timeout=2), command=command) as endpoint:
-            self.assertTrue(stderr_seen.wait(2), 'endpoint stderr did not reach the live logger')
-            reply = endpoint.call('generate', local_ltk='fixture-request-key')
-            self.assertEqual(reply['data'], 'fixture-short-key')
-            self.assertEqual(reply['identity'], 'fixture-identity')
+        def reply(request, peer):
+            return {'status': 0, 'data': 'fixture-short-key', 'identity': 'fixture-identity'}
+        with capture(records.append), BridgeFixture(reply) as bridge:
+            endpoint = bridge.connect()
+            response = endpoint.call('generate', local_ltk='fixture-request-key')
+            self.assertEqual(response['data'], 'fixture-short-key')
+            self.assertEqual(response['identity'], 'fixture-identity')
         text = json.dumps(records)
         self.assertNotIn('fixture-short-key', text)
         self.assertNotIn('fixture-request-key', text)
         self.assertNotIn('fixture-identity', text)
-        self.assertIn('actual endpoint stderr: helper initialized', text)
+        self.assertTrue(any(r['message'] == 'reply' and r['fields']['reply'].get('status') == 0 for r in records))
+        self.assertTrue(any(r['message'] == 'request' and r['fields']['operation'] == 'generate' for r in records))
 
     def test_timeout_reaps_only_the_logger_owned_child(self):
         command = self.script('import time\ntime.sleep(20)\n')
