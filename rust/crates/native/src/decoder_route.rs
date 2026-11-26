@@ -1085,7 +1085,17 @@ pub(crate) mod tests {
         assert_eq!(result["original_avc_restored"], true);
         assert_eq!(result["state"]["program"], PROGRAM);
         let attempted = sys::open(&paths.lock(), libc::O_RDWR, 0).unwrap();
-        sys::flock(attempted.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB).unwrap();
+        // A child spawned by a parallel test can hold a copy until it execs.
+        let release_deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            match sys::flock(attempted.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) {
+                Ok(()) => break,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < release_deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("Decoder route lock was not available after restoration: {error}"),
+            }
+        }
     }
 
     #[test]
