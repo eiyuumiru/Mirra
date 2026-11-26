@@ -13,6 +13,19 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  rust:
+    # Process, plist and ownership fixtures use Darwin APIs and macOS tools.
+    runs-on: macos-15-intel
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.98.1 --profile minimal --no-self-update
+      - name: Rust workspace tests
+        run: cargo +1.98.1 test --workspace --locked --manifest-path rust/Cargo.toml
+
   regression:
     # Runtime/process tests use Darwin APIs. This does not claim a supported
     # Mirroring host, a private-framework build, or a physical phone connection.

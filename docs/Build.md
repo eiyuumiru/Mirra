@@ -102,6 +102,7 @@ Run the checks appropriate to the change:
 
 | Command | Coverage |
 | --- | --- |
+| `cargo test --workspace --locked --manifest-path rust/Cargo.toml` | All Rust workspace unit tests and documentation tests |
 | `make test` | Python configuration, transport, lifecycle and export tests |
 | `make interface` | Native window, existing and new setup flows, and connection preflight using fixtures |
 | `make authorization` | SSH password helper and secure input channel |
@@ -114,6 +115,9 @@ Run the checks appropriate to the change:
 | `make environment` | Public graphics probe, valid H.264 fixture and bounded access-unit parsing; no required hardware result |
 | `make decoder` | Decoder option filtering, stream metadata and argument preservation |
 | `make certificate` | Certificate API handling using isolated fixtures |
+
+GitHub's source checks run the Rust workspace tests with Rust 1.98.1 on an Intel
+macOS runner, alongside the Python and native fixture job.
 
 Native UI tests run as a temporary app through LaunchServices. Device-facing
 effects are replaced with fixtures. Test bundles are kept outside Spotlight
