@@ -116,8 +116,8 @@ Run the checks appropriate to the change:
 | `make decoder` | Decoder option filtering, stream metadata and argument preservation |
 | `make certificate` | Certificate API handling using isolated fixtures |
 
-GitHub's source checks run the Rust workspace tests with Rust 1.98.1 on an Intel
-macOS runner, alongside the Python and native fixture job.
+GitHub CI runs on pull requests and pushes to `main`. The Intel macOS jobs cover
+the Rust workspace with Rust 1.98.1, Python tests, and native fixtures.
 
 Native UI tests run as a temporary app through LaunchServices. Device-facing
 effects are replaced with fixtures. Test bundles are kept outside Spotlight

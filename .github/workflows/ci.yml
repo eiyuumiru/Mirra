@@ -1,7 +1,8 @@
-name: Source checks
+name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -9,11 +10,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: source-${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   rust:
+    name: Rust tests
     # Process, plist and ownership fixtures use Darwin APIs and macOS tools.
     runs-on: macos-15-intel
     timeout-minutes: 25
@@ -26,7 +28,8 @@ jobs:
       - name: Rust workspace tests
         run: cargo +1.98.1 test --workspace --locked --manifest-path rust/Cargo.toml
 
-  regression:
+  python:
+    name: Python and native checks
     # Runtime/process tests use Darwin APIs. This does not claim a supported
     # Mirroring host, a private-framework build, or a physical phone connection.
     runs-on: macos-15-intel
@@ -38,7 +41,7 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.14'
-      - name: Regression tests
+      - name: Python unit tests
         run: python3 -B -m unittest discover -s tests -v
       - name: Keystore symbol loading (host fixtures)
         run: make symbols

@@ -3,7 +3,7 @@
   "files": [
     ".github/ISSUE_TEMPLATE/bug_report.md",
     ".github/pull_request_template.md",
-    ".github/workflows/checks.yml",
+    ".github/workflows/ci.yml",
     ".gitignore",
     "CHANGELOG.md",
     "CONTRIBUTING.md",
