@@ -7,9 +7,12 @@ import os
 from pathlib import Path
 import re
 import secrets
+import shutil
 import subprocess
 
-from provisioning import new_profile, fingerprints, pin_host, authorize, deploy, destination, remote, RemoteSetupError, signing_tool, verify_key
+from provisioning import new_profile, fingerprints, pin_host, authorize, deploy, destination, remote, RemoteSetupError, signing_tool, verify_key, pair
+from bridgeclient import DEFAULT_PORT, normalize_token, read_token
+from bridgeupdate import update_bridge
 from transport import EndpointError
 from compatibility import inspect_media_profile, supported_apple_app
 from configuration import ROOT, load_config
@@ -42,8 +45,25 @@ SETUP_MESSAGES = {
     'bridge_key_layout_unsupported': 'The bridge accepted its key, but its format is unsupported by Mirra’s broker. Keep the existing setup error for compatibility review; retrying SSH or issuing another certificate does not verify this format.',
     'device_certificate_unavailable': 'The bridge helper could not read its saved device certificate. Reopen bridge setup and check certificate preparation before starting support.',
     'helper_terminated': 'SSH login worked, but the phone stopped Mirra’s helper. Show log includes the launch status. Keep those logs and report the bridge’s iOS and jailbreak versions.',
+    'sudo_password_required': 'Installing the bridge service needs root on the phone. Enter the phone account’s password when asked (it is used once with sudo and not saved), or use the root SSH account.',
+    'sudo_password_rejected': 'sudo on the phone rejected that password. Choose Prepare connection again and enter the phone account’s password.',
+    'bridge_unreachable': 'The bridge service was installed but the Mac cannot reach it. Keep the phone unlocked on the same network (or connected by USB) with its jailbreak active, check Mirra’s Local Network permission, then retry.',
+    'bridge_refused': 'The phone refused the bridge service port. The service may still be starting or failed to launch; check Settings → Mirra Bridge on the phone, then retry.',
+    'bridge_token_rejected': 'The bridge service rejected the saved pairing token. Compare it with Settings → Mirra Bridge on the phone and set up again.',
+    'bridge_tls_unavailable': 'This copy of Mirra lacks the TLS support needed for the bridge service. Use the complete Mirra app with its bundled runtime.',
+    'bridge_pairing_missing': 'This bridge profile has no pairing token. Set the bridge up again.',
+    'bridge_service_invalid': 'Another program answered on the bridge service port. Check the phone’s Settings → Mirra Bridge and retry setup.',
+    'invalid_pairing_token': 'Enter the 24-character token shown in Settings → Mirra Bridge on the iPhone.',
+    'missing_pairing_address': 'Enter the bridge iPhone’s Wi-Fi address or choose it from the USB device list.',
+    'bridge_update_access_missing': 'Open Mirra on the Mac that set up this bridge over SSH to install the update.',
+    'bridge_update_unverified': 'Mirra could not verify the bridge installation. Check the phone and the setup logs.',
 }
 
+PAIR_MESSAGES = {
+    'bridge_unreachable': 'Mirra could not reach the bridge. Check the Wi-Fi address or USB cable, keep the jailbreak active, and verify Mirra’s Local Network permission.',
+    'bridge_token_rejected': 'The bridge rejected the token. Copy the current token from Settings → Mirra Bridge and try again.',
+    'device_certificate_unavailable': 'This bridge has no saved certificate. Choose Set Up a New iPhone to finish preparing it.',
+}
 
 class SetupIssue(RuntimeError):
     """An actionable message selected locally, never arbitrary remote output."""
@@ -124,7 +144,7 @@ class SetupWizard:
             state = self.load()
         # This local wizard report intentionally includes the host and public
         # fingerprint for the owner's trust decision, but never credentials.
-        result = {k: state[k] for k in ('id', 'phase', 'host', 'transport', 'user', 'fingerprint',
+        result = {k: state[k] for k in ('id', 'phase', 'mode', 'host', 'transport', 'user', 'fingerprint',
                   'host_key_type', 'error', 'certificate_issued', 'product_type', 'os_version') if k in state}
         result['defaults'] = self.defaults()
         if state.get('error') and state.get('error_code'):
@@ -166,15 +186,19 @@ class SetupWizard:
             if forwarder is not None:
                 forwarder.close()
 
-    def begin(self, settings):
-        self.host_check()
-        os.umask(0o077)
+    def new_directory(self):
         self.base.mkdir(parents=True, exist_ok=True, mode=0o700)
         if self.base.stat().st_uid != os.getuid() or self.base.stat().st_mode & 0o077:
             raise RuntimeError('Setup directory must be private')
         identifier = secrets.token_hex(16)
-        directory, access, _ = self.paths(identifier)
-        directory.mkdir(mode=0o700)
+        self.paths(identifier)[0].mkdir(mode=0o700)
+        return identifier
+
+    def begin(self, settings):
+        self.host_check()
+        os.umask(0o077)
+        identifier = self.new_directory()
+        _, access, _ = self.paths(identifier)
         transport = settings.get('transport', 'ssh')
         if transport == 'usb' and not settings.get('serial'):
             raise ValueError('Choose the USB bridge from the device list')
@@ -192,6 +216,38 @@ class SetupWizard:
         self.save(state)
         self.started_id = identifier
         return self.scan(identifier)
+
+    def pair_existing(self, settings):
+        try:
+            token = normalize_token(settings.get('token'))
+        except ValueError as error:
+            raise SetupIssue('invalid_pairing_token') from error
+        transport = settings.get('transport')
+        host = settings.get('host') if transport == 'ssh' else '127.0.0.1'
+        if (transport == 'ssh' and not host) or (transport == 'usb' and not settings.get('serial')):
+            raise SetupIssue('missing_pairing_address')
+        self.host_check()
+        identifier = self.new_directory()
+        directory, access, ready = self.paths(identifier)
+        try:
+            config = replace(load_config(self.root / 'config/example.json', root=self.root),
+                             transport=transport, ssh_host=host,
+                             service_port=int(settings.get('port', DEFAULT_PORT)),
+                             serial=settings.get('serial', '') if transport == 'usb' else '',
+                             product_type=settings.get('product_type', '') if transport == 'usb' else '',
+                             user_file=directory / 'user', identity_file=directory / 'identity',
+                             known_hosts_file=directory / 'known_hosts')
+            write_state(access, config.as_dict())
+            details = pair(load_config(access, root=self.root), ready, token)
+            capabilities = details.get('capabilities', {})
+            state = {'schema_version': 1, 'id': identifier, 'mode': 'existing', 'phase': 'ready',
+                     'transport': transport, 'host': host if transport == 'ssh' else 'USB bridge',
+                     'product_type': capabilities.get('product_type', ''), 'os_version': capabilities.get('os_version', '')}
+            self.save(state)
+        except Exception:
+            shutil.rmtree(directory, ignore_errors=True)
+            raise
+        return self.describe(state)
 
     def scan(self, identifier):
         state = self.load(identifier)
@@ -288,7 +344,7 @@ class SetupWizard:
                 details = self.read(ready.with_suffix('.provisioning.json'))
             else:
                 details = deploy(config, ready, binary=self.root / 'build/endpoint',
-                                 issue_if_missing=True, resume=True)
+                                 issue_if_missing=True, resume=True, askpass=self.askpass)
                 # The temporary setup proxy is not the installed service port.
                 if base.transport == 'usb':
                     write_state(ready, replace(load_config(ready), listen_port=base.listen_port).as_dict())
@@ -298,6 +354,18 @@ class SetupWizard:
         self.save(state)
         return self.describe(state)
 
+    def update_bridge(self, _identifier):
+        from readiness import observe
+
+        self.service.validate_package()
+        saved = load_config(self.service.package / 'config.json')
+        token = read_token(saved.token_file)
+        with self.connection(saved) as config:
+            changed = update_bridge(config, token, self.root, self.askpass)
+        message = ('Mirra Bridge was updated on the iPhone.' if changed
+                   else 'Mirra Bridge is already up to date.')
+        return {'message': message, 'support_report': observe(self.service)}
+
     def finish(self, identifier):
         state = self.load(identifier)
         if state['phase'] not in ('ready', 'installed'):
@@ -305,6 +373,8 @@ class SetupWizard:
         _, _, ready = self.paths(identifier)
         self.host_check()
         config = load_config(ready)
+        # Validate replacement credentials before stopping any working support.
+        self.service.validate_saved_bridge(config)
         # The final UI action explicitly switches to this verified bridge.
         with activity.operation('Service', 'stop previous bridge'):
             self.service.stop()
@@ -320,9 +390,16 @@ class SetupWizard:
                  'scan': 'Check the phone’s Wi-Fi address, SSH port and active jailbreak.',
                  'trust': 'The phone’s SSH key did not match. Check its fingerprint before retrying.',
                  'connect': 'Check the SSH account and password. The phone also needs ldid available in its SSH shell.',
-                 'provision': 'Certificate or helper setup did not finish. Keep the phone online with its jailbreak active, then retry.',
+                 'provision': 'Bridge service or certificate setup did not finish. Keep the phone online with its jailbreak active, then retry.',
                  'finish': 'Support could not switch to this bridge. Keep diagnostics and check service status before retrying.'}
         code = error.code if isinstance(error, (SetupIssue, EndpointError)) and error.code in SETUP_MESSAGES else None
+        if action == 'update-bridge':
+            return {'error': SETUP_MESSAGES.get(code, 'The iPhone update could not finish. Check the bridge connection and setup logs.'),
+                    'error_code': code}
+        if action == 'pair':
+            message = PAIR_MESSAGES.get(code, SETUP_MESSAGES.get(code,
+                'Mirra could not verify this bridge. Check its address, port and pairing token, then retry.'))
+            return {'phase': 'new', 'mode': 'existing', 'error': message, 'error_code': code}
         message = SETUP_MESSAGES[code] if code else hints.get(action, 'Setup could not finish. Reopen setup and try again.')
         if action == 'begin':
             identifier = self.started_id

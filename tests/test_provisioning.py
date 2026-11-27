@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from provisioning import new_profile, pin_host, fingerprints, authorize, deploy, exclusive_write, RemoteSetupError, signing_tool, remote_helper
+from provisioning import new_profile, pin_host, fingerprints, authorize, deploy, exclusive_write, RemoteSetupError, signing_tool, remote_helper, SERVICE_DIRECTORY
 from bridgepaths import ENVIRONMENT_SCRIPT, ROOTHIDE_ENTITLEMENTS
 from compiler import write_link_stubs
 from configuration import load_config
@@ -166,12 +166,17 @@ class CertificateFlowTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         path = self.root / 'access.json'; path.write_text('{}')
         self.config = replace(load_config(path, root=self.root), transport='usb', product_type='iPhone11,2')
+        self.config.user_file.parent.mkdir(parents=True, exist_ok=True)
+        self.config.user_file.write_text('root\n')
         self.binary = self.root / 'endpoint'; self.binary.write_bytes(b'fixture binary')
         self.certificate = b'fixture DER'; self.digest = hashlib.sha256(self.certificate).hexdigest()
+        self.token = 'A' * 24
+        self.roothide_root = '/private/var/containers/Bundle/Application/fixture-root'
 
     def attempt(self, cached_error=None, ltk=None, path_mode='native', rootless=False, helper_error=None, key_reply=None, **options):
         calls = []
         inputs = []
+        api_calls = []
         def command(config, arguments, data=None, timeout=20):
             calls.append(arguments)
             inputs.append((arguments, data))
@@ -181,12 +186,33 @@ class CertificateFlowTests(unittest.TestCase):
             if '--capabilities' in arguments:
                 if helper_error: raise helper_error
                 return b'{"required_symbols_available":true}'
-            if '--export-certificate' in arguments or '--issue-certificate' in arguments:
-                if '--export-certificate' in arguments and cached_error: raise cached_error
-                return json.dumps({'certificate_exported': True, 'sha256': self.digest}).encode()
-            if arguments[0] == 'cat': return self.certificate
+            if arguments[0] == 'jbroot': return (self.roothide_root + arguments[1]).encode()
+            if arguments[0] == 'cat':
+                self.assertEqual(arguments[1], ('/rootfs' if path_mode == 'roothide' else '') + SERVICE_DIRECTORY + '/token')
+                return self.token.encode()
+            if arguments[:2] == ['sh', '-c'] and 'launchctl load -w' in arguments[2]:
+                return b'{"settings_entry":true}'
             return b''
+        def json_request(config, token, method, path, payload=None, timeout=20):
+            api_calls.append((method, path, payload))
+            self.assertEqual(token, self.token)
+            self.assertEqual(config.path_mode, 'native')
+            self.assertEqual(config.remote_certificate, SERVICE_DIRECTORY + '/certificate.der')
+            if (method, path) == ('GET', '/v1/status'):
+                return 200, {'service': 'mirra-bridge'}
+            self.assertEqual((method, path), ('POST', '/v1/certificate'))
+            if not payload['issue'] and cached_error:
+                return 503, {'error': cached_error.code or 'certificate_unavailable',
+                             'message': str(cached_error), **cached_error.details}
+            return 200, {'certificate_exported': True, 'sha256': self.digest}
+        def download(config, token, method, path, timeout=20):
+            api_calls.append((method, path, None))
+            self.assertEqual((method, path), ('GET', '/v1/certificate'))
+            self.assertEqual(token, self.token)
+            return 200, {}, self.certificate
         with patch('provisioning.remote', side_effect=command), \
+                patch('provisioning.request_json', side_effect=json_request), \
+                patch('provisioning.request', side_effect=download), \
                 patch('provisioning.require_ios_endpoint', return_value={'platform': 'ios'}), \
                 patch('provisioning.subprocess.run', return_value=subprocess.CompletedProcess([], 0, 'platform IOS\n', '')), \
                 patch('provisioning.Endpoint') as endpoint:
@@ -200,13 +226,20 @@ class CertificateFlowTests(unittest.TestCase):
             finally:
                 self.calls = calls
                 self.inputs = inputs
+                self.api_calls = api_calls
         return result
+
+    @property
+    def certificate_requests(self):
+        return [payload for method, path, payload in self.api_calls
+                if (method, path) == ('POST', '/v1/certificate')]
 
     def test_cached_certificate_is_reused_without_issuance(self):
         result = self.attempt(issue_if_missing=True)
         self.assertFalse(result['certificate_issued'])
-        self.assertFalse(any('--issue-certificate' in call for call in self.calls))
-        self.assertTrue(result['wire_layout_validated'])
+        self.assertEqual(self.certificate_requests, [{'issue': False}])
+        self.assertTrue(result['fresh_attested_key_validated'])
+        self.assertFalse(any('--export-certificate' in call or '--issue-certificate' in call for call in self.calls))
         self.assertTrue(any(call[0] == '/var/jb/usr/bin/ldid' for call in self.calls))
 
     def test_attested_key_failure_is_preserved_before_ready_publication(self):
@@ -217,19 +250,21 @@ class CertificateFlowTests(unittest.TestCase):
         self.assertEqual(caught.exception.details['status'], -7)
         self.assertFalse((self.root / 'ready.json').exists())
         self.assertFalse((self.root / 'certificate.der').exists())
-        self.assertFalse(any('--issue-certificate' in call for call in self.calls))
+        self.assertFalse((self.root / 'token').exists())
+        self.assertEqual(self.certificate_requests, [{'issue': False}])
 
     def test_rootless_deployment_persists_bootstrap_paths_through_signing_and_launch(self):
         result = self.attempt(rootless=True)
         configured = load_config(self.root / 'ready.json')
         self.assertTrue(configured.remote_endpoint.startswith('/var/jb/var/mobile/MirraCache/'))
-        self.assertTrue(configured.remote_certificate.startswith('/var/jb/var/mobile/MirraCache/'))
+        self.assertEqual(configured.remote_certificate, SERVICE_DIRECTORY + '/certificate.der')
         self.assertEqual(configured.path_mode, 'native')
         self.assertIn(['/var/jb/usr/bin/ldid', '-S' + result['remote_directory'] + '/endpoint.plist',
                        configured.remote_endpoint], self.calls)
-        launches = [c for c in self.calls if '--capabilities' in c or '--export-certificate' in c]
-        self.assertEqual(len(launches), 2)
+        launches = [c for c in self.calls if '--capabilities' in c]
+        self.assertEqual(len(launches), 1)
         self.assertTrue(all(configured.remote_endpoint in c for c in launches))
+        self.assertEqual(self.certificate_requests, [{'issue': False}])
         self.assertFalse(any('ln -s' in str(c) for c in self.calls))
 
     def test_explicit_root_is_preserved_for_rootless(self):
@@ -242,23 +277,29 @@ class CertificateFlowTests(unittest.TestCase):
             self.attempt(rootless=True, helper_error=error, issue_if_missing=True)
         self.assertEqual(caught.exception.code, 'helper_terminated')
         self.assertFalse((self.root / 'ready.json').exists())
-        self.assertFalse(any('--issue-certificate' in c or '--export-certificate' in c for c in self.calls))
+        self.assertEqual(self.api_calls, [])
+        self.assertFalse(any('launchctl load -w' in str(c) for c in self.calls))
 
     def test_roothide_separates_code_and_data_and_saves_runtime_translation(self):
         import plistlib
         result = self.attempt(path_mode='roothide', issue_if_missing=True)
-        self.assertTrue(result['remote_endpoint'].startswith('/usr/local/libexec/Mirra/'))
-        self.assertTrue(result['remote_certificate'].startswith('/var/mobile/Library/Caches/Mirra/'))
-        self.assertEqual(result['path_mode'], 'roothide')
+        self.assertTrue(result['remote_directory'].startswith('/usr/local/libexec/Mirra/'))
+        self.assertTrue(result['remote_endpoint'].startswith(self.roothide_root + '/usr/local/libexec/Mirra/'))
+        self.assertEqual(result['setup_path_mode'], 'roothide')
         configured = load_config(self.root / 'ready.json')
-        self.assertEqual(configured.path_mode, 'roothide')
+        self.assertEqual(configured.path_mode, 'native')
         self.assertEqual(configured.remote_endpoint, result['remote_endpoint'])
-        self.assertEqual(configured.remote_certificate, result['remote_certificate'])
+        self.assertEqual(configured.remote_certificate, SERVICE_DIRECTORY + '/certificate.der')
         entitlements = next(data for args, data in self.inputs if data and data.startswith(b'<?xml'))
         values = plistlib.loads(entitlements)
         self.assertTrue(all(values[name] is True for name in ROOTHIDE_ENTITLEMENTS))
         self.assertTrue(values['com.apple.keystore.device'])
-        self.assertFalse(any('--issue-certificate' in call for call in self.calls))
+        service = next(plistlib.loads(data) for args, data in self.inputs
+                       if data and data.startswith(b'<?xml') and 'service.plist' in str(args))
+        self.assertEqual(service['ProgramArguments'][0], configured.remote_endpoint)
+        self.assertEqual(service['ProgramArguments'][2], SERVICE_DIRECTORY)
+        self.assertTrue(service['__Patched'])
+        self.assertEqual(self.certificate_requests, [{'issue': False}])
 
     def test_roothide_publication_resume_retains_both_paths_and_mode(self):
         def interrupted(path, data):
@@ -268,10 +309,11 @@ class CertificateFlowTests(unittest.TestCase):
             with self.assertRaises(OSError): self.attempt(path_mode='roothide', resume=True)
         self.attempt(resume=True)
         configured = load_config(self.root / 'ready.json')
-        self.assertEqual(configured.path_mode, 'roothide')
-        self.assertTrue(configured.remote_endpoint.startswith('/usr/local/libexec/Mirra/'))
-        self.assertTrue(configured.remote_certificate.startswith('/var/mobile/Library/Caches/Mirra/'))
+        self.assertEqual(configured.path_mode, 'native')
+        self.assertTrue(configured.remote_endpoint.startswith(self.roothide_root + '/usr/local/libexec/Mirra/'))
+        self.assertEqual(configured.remote_certificate, SERVICE_DIRECTORY + '/certificate.der')
         self.assertEqual(self.calls, [])
+        self.assertEqual(self.api_calls, [])
 
     def test_signal_received_after_authentication_is_not_a_missing_certificate(self):
         stderr = ('debug1: handshake detail\n' * 200 + 'Authenticated to phone using "publickey".\n'
@@ -295,20 +337,29 @@ class CertificateFlowTests(unittest.TestCase):
     def test_missing_cache_requests_issuance_then_verifies_matching_certificate(self):
         result = self.attempt(RemoteSetupError('No cache', 'cached_certificate_unavailable'), issue_if_missing=True)
         self.assertTrue(result['certificate_issued'])
-        self.assertEqual(sum('--issue-certificate' in call for call in self.calls), 1)
+        self.assertEqual(self.certificate_requests, [{'issue': False}, {'issue': True}])
         self.assertEqual((self.root / 'certificate.der').read_bytes(), self.certificate)
         self.assertTrue((self.root / 'ready.json').exists())
 
     def test_unrelated_ssh_error_does_not_request_certificate_issuance(self):
         with self.assertRaises(RemoteSetupError):
-            self.attempt(RemoteSetupError('cached_certificate_unavailable mentioned in stderr'), issue_if_missing=True)
-        self.assertFalse(any('--issue-certificate' in call for call in self.calls))
+            self.attempt(helper_error=RemoteSetupError('cached_certificate_unavailable mentioned in stderr'),
+                         issue_if_missing=True)
+        self.assertEqual(self.api_calls, [])
+        self.assertFalse((self.root / 'ready.json').exists())
+
+    def test_unrelated_service_error_does_not_request_certificate_issuance(self):
+        with self.assertRaises(RemoteSetupError) as caught:
+            self.attempt(RemoteSetupError('cached_certificate_unavailable mentioned in an unrelated error',
+                                          'certificate_export_failed'), issue_if_missing=True)
+        self.assertEqual(caught.exception.code, 'certificate_export_failed')
+        self.assertEqual(self.certificate_requests, [{'issue': False}])
         self.assertFalse((self.root / 'ready.json').exists())
 
     def test_cli_does_not_issue_without_explicit_choice(self):
         with self.assertRaises(RemoteSetupError):
             self.attempt(RemoteSetupError('No cache', 'cached_certificate_unavailable'))
-        self.assertFalse(any('--issue-certificate' in call for call in self.calls))
+        self.assertEqual(self.certificate_requests, [{'issue': False}])
 
     def interrupt_publication(self, name):
         def interrupted(path, data):
@@ -326,6 +377,7 @@ class CertificateFlowTests(unittest.TestCase):
         result = self.attempt(resume=True)
         self.assertTrue(result['fresh_attested_key_validated'])
         self.assertEqual(self.calls, [])
+        self.assertEqual(self.api_calls, [])
         self.assertTrue((self.root / 'ready.json').exists())
 
     def test_restart_after_report_publication_commits_ready_profile(self):
@@ -333,6 +385,7 @@ class CertificateFlowTests(unittest.TestCase):
         self.assertTrue((self.root / 'ready.provisioning.json').exists())
         self.attempt(resume=True)
         self.assertEqual(self.calls, [])
+        self.assertEqual(self.api_calls, [])
         self.assertTrue((self.root / 'ready.json').exists())
 
     def test_restart_refuses_changed_certificate_and_preserves_it(self):

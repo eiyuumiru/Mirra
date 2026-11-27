@@ -1,10 +1,17 @@
 # Background support
 
-The per-user LaunchAgent keeps bridge and native launch support available
-without an open Terminal. Guided setup installs it; source users can manage it
-with the CLI below after building and provisioning a bridge.
+The per-user LaunchAgent starts `mirra-cli run-service` at macOS login. The CLI
+starts the existing supervisor with the saved bridge profile and enables
+automatic reconnection. Once support is ready, open Apple's iPhone Mirroring
+directly. Guided setup installs the job and the CLI into Mirra's Application Support.
 
 ## Install and control
+
+The CLI in the app bundle can inspect and control the installed service:
+
+```sh
+"/Applications/Mirra.app/Contents/Resources/Support/build/mirra-cli" control status
+```
 
 Native support requires SIP disabled or a compatible partially enabled
 configuration on the macOS host. Fully enabled SIP is currently unsupported;
@@ -25,6 +32,27 @@ source profile does not change a running service.
 Status reports registration, native launch support and bridge health. Readiness
 requires matching live process identities. It does not establish target video.
 
+When the bridge certificate expires, support checks the enrolled bridge for a
+current replacement and requests renewal if needed. If the issuer still returns
+an expired certificate, Mirra reports it and waits 15 minutes before requesting
+issuance again.
+
+Choose **Renew Now** in Mirra or run the following command to request renewal
+immediately. Mirra checks for a valid certificate on the enrolled bridge first
+and reports the outcome.
+
+```sh
+"/Applications/Mirra.app/Contents/Resources/Support/build/mirra-cli" control renew
+```
+
+When `control status` or `control renew` reports `bridge_update_available`,
+choose **Update Bridge** in Mirra. With a saved SSH account that already has
+installation privileges, the bundled CLI can also perform the update.
+
+```sh
+"/Applications/Mirra.app/Contents/Resources/Support/build/mirra-cli" setup update-bridge </dev/null
+```
+
 ```sh
 python3 scripts/service.py stop
 python3 scripts/service.py start
@@ -36,7 +64,8 @@ python3 scripts/service.py remove
 preserving private setup, logs and the installed package.
 
 If Apple's iPhone Mirroring is already open when background support starts,
-support waits for it to quit before preparing a session. Mirra shows **Quit
+Mirra checks the Mac and then waits for the Apple app to quit before preparing
+a session. Mirra shows **Quit
 iPhone Mirroring**: use Command-Q in Apple's app, then wait for Mirra to become
 ready. Startup continues automatically in the same support process. Stop still
 cancels this wait. Closing only the app's window may leave it running.
@@ -88,6 +117,11 @@ Without `--config`, replacement preserves the installed profile and credentials.
 Add `--config PATH` to select another bridge. Cleanup must finish before replacement.
 The previous package is archived for rollback.
 
+Installations from before service pairing need a paired bridge profile from Setup
+before updating. Mirra preserves their existing support and credentials. It also
+checks that the selected pairing token and certificate exist and contain data
+before stopping support or preparing a replacement package.
+
 Transport changes update the owned launch definition atomically. Conflicting
 or unfamiliar jobs are not overwritten. Previous packages are retained until
 removed explicitly.
@@ -96,7 +130,7 @@ removed explicitly.
 
 | Path under the user's home directory | Purpose |
 | --- | --- |
-| `Library/Application Support/Mirra/current` | Service code, adapters and Python runtime |
+| `Library/Application Support/Mirra/current` | Rust CLI, service code, adapters and Python runtime |
 | `Library/Application Support/Mirra/current/private` | SSH access and device certificate |
 | `Library/Application Support/Mirra/current/config.json` | Installed profile |
 | `Library/Application Support/Mirra/current/runtime` | Session and attempt state |

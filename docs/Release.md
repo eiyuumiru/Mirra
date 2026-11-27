@@ -3,8 +3,8 @@
 `VERSION` supplies the release version. `config/release.json` supplies internal
 bundle metadata and the repository URL. Package filenames use that version.
 
-The release version is **0.1.3**. Its changes are recorded in the
-[changelog](../CHANGELOG.md#013). Local packages can be built and staged for
+The release version is **0.2.0**. Its changes are recorded in the
+[changelog](../CHANGELOG.md#020). Local packages can be built and staged for
 review; tagging and publication are separate steps.
 
 ## Prepare
@@ -28,9 +28,12 @@ The command creates `Mirra-v<version>.dmg` under `dist/app` and prints its SHA-2
 Stage the selected DMG under `dist/v<version>/` alongside `SHA256SUMS` and
 `RELEASE-NOTES.md`, following the v0.1.0 release layout. Keep internal build
 numbers out of release asset names. The internal bundle number advances once
-per release: v0.1.0 uses 31, v0.1.1 uses 32, v0.1.2 uses 33 and v0.1.3 uses 34.
+per release: v0.1.0 uses 31, v0.1.1 uses 32, v0.1.2 uses 33, v0.1.3 uses 34 and v0.2.0 uses 35.
 
 ## Release signing
+
+The local v0.2.0 build uses ad-hoc signing and is not notarized. It has not
+been published by the build or verification commands.
 
 The v0.1.3 distribution uses a persistent self-signed certificate. It is not an
 Apple Developer ID and the app is not notarized. Signature verification checks

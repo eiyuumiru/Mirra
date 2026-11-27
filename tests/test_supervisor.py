@@ -122,6 +122,7 @@ class BackendReadinessTests(unittest.TestCase):
         original = subprocess.CompletedProcess([], 0,
             f'path = {ORIGINAL_PLIST}\nprogram = {PROGRAM}\n', '')
         with patch('configuration.load_config', return_value=config), \
+                patch('certificates.current_certificate', return_value=(b'fixture certificate', 1, 2, False)), \
                 patch('workspace.BrokerWorkspace', return_value=workspace), \
                 patch('workspace.cleanup', return_value={'removed': False}), \
                 patch('processes.process_birth', side_effect=birth), \
@@ -175,6 +176,27 @@ class BackendWorkerTests(unittest.TestCase):
                 return state
             time.sleep(.02)
         self.fail('Backend did not reach expected state: ' + repr(backend.snapshot()))
+
+    def test_certificate_lock_collision_preserves_the_expired_observation(self):
+        (self.root / 'scripts/backend.py').write_text('''
+import json, pathlib, sys
+settings = pathlib.Path(sys.argv[sys.argv.index('--config') + 1])
+first = settings.parent.name == 'backend-000001'
+print(json.dumps({'BRIDGE_CERTIFICATE_ERROR': 'expired' if first else 'busy',
+                  'retry_at': 1234 if first else None}), flush=True)
+sys.exit(1)
+''')
+        with patch('supervisor.ROOT', self.root), \
+                patch('supervisor.recovery_gate', return_value=(True, None)), \
+                patch('supervisor.SharingdAgent.recover_abandoned', return_value=None), \
+                patch('supervisor.emit_event'):
+            backend = NativeBackend(self.config, self.run, recover=True).start()
+            try:
+                state = self.wait_for(backend, lambda value: value['attempt'] == 2 and value['phase'] == 'retry_wait')
+                self.assertEqual(state['certificate_issue'], 'expired')
+                self.assertEqual(state['certificate_retry_at'], 1234)
+            finally:
+                backend.close()
 
     def test_missing_runtime_is_restored_before_a_real_worker_reaches_readiness(self):
         self.run.chmod(0o700)

@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import subprocess
 
 MINIMUM_MACOS = '15.0'
@@ -18,6 +19,29 @@ def compiler_flags(sdk=None):
         ['xcrun', '--sdk', 'macosx', '--show-sdk-path'], text=True).strip()
     return ['-target', f'{ARCHITECTURE}-apple-macos{MINIMUM_MACOS}', '-isysroot', sdk,
             '-Werror=unguarded-availability-new']
+
+
+def swift_flags(sdk=None):
+    _, target, _, sdk, _ = compiler_flags(sdk)
+    return ['-target', target, '-sdk', sdk]
+
+
+def build_rust(manifest, output, sdk=None):
+    """Build the mirra-cli binary of the Rust workspace at `manifest` and copy it to `output`."""
+    _, _, _, sdk, _ = compiler_flags(sdk)
+    manifest = Path(manifest).resolve()
+    target_dir = manifest.parent / 'target'
+    triple = ARCHITECTURE + '-apple-darwin'
+    env = {**os.environ, 'SDKROOT': sdk, 'MACOSX_DEPLOYMENT_TARGET': MINIMUM_MACOS, 'CARGO_TARGET_DIR': str(target_dir)}
+    # Cargo runs inside the Python recipe without make's jobserver descriptors.
+    for name in ('MAKEFLAGS', 'MFLAGS', 'CARGO_MAKEFLAGS'):
+        env.pop(name, None)
+    subprocess.run(['cargo', 'build', '--release', '--locked', '--manifest-path', str(manifest),
+                    '-p', 'mirra-cli', '--target', triple], env=env, check=True)
+    built = target_dir / triple / 'release' / 'mirra-cli'
+    verify_macos_binary(built)
+    shutil.copyfile(built, output)
+    os.chmod(output, 0o755)
 
 
 def version(value):
@@ -50,15 +74,18 @@ def verify_app(app):
         raise ValueError('App minimum macOS differs from the compiled target')
     endpoint = app / 'Contents/Resources/Support/build/endpoint'
     require_ios_endpoint(endpoint)
+    settings = app / 'Contents/Resources/Support/build/settings'
+    require_ios_endpoint(settings, filetype=8)
     binaries = {}
     for path in sorted(app.rglob('*')):
-        if not path.is_file() or path == endpoint:
+        if not path.is_file() or path in (endpoint, settings):
             continue
         with path.open('rb') as stream:
             magic = stream.read(4)
         if magic in MAGICS:
             binaries[str(path.relative_to(app))] = verify_macos_binary(path)
     required = {'Contents/MacOS/Mirra', 'Contents/MacOS/password',
+                'Contents/Resources/Support/build/mirra-cli',
                 'Contents/Resources/Support/python/bin/python3'}
     if not required.issubset(binaries):
         raise ValueError('App is missing a required native executable')
@@ -70,6 +97,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--sdk')
     parser.add_argument('--flags', action='store_true')
+    parser.add_argument('--swift-flags', action='store_true')
+    parser.add_argument('--build-rust', nargs=2, metavar=('MANIFEST', 'OUTPUT'))
     parser.add_argument('--stamp', type=Path)
     parser.add_argument('--app', type=Path)
     args = parser.parse_args()
@@ -81,6 +110,10 @@ def main():
             args.stamp.write_text(contents)
     elif args.flags:
         print(shlex.join(compiler_flags(args.sdk)))
+    elif args.swift_flags:
+        print(shlex.join(swift_flags(args.sdk)))
+    elif args.build_rust:
+        build_rust(*args.build_rust, sdk=args.sdk)
     else:
         parser.error('Choose --flags, --stamp or --app')
 

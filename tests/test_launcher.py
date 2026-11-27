@@ -30,7 +30,7 @@ class NativeLaunchAgentRecoveryTests(unittest.TestCase):
         self.job = self.original
         self.calls = []
         self.fail_probe_bootstrap = False
-        self.agent = module.NativeLaunchAgent(self.run, {'MIRRA_LAUNCH_PROBE': 'test'})
+        self.agent = module.NativeLaunchAgent(self.run, {'DYLD_INSERT_LIBRARIES': '/fixture/keystore.dylib'})
         self.agent.command = self.launchctl
 
     def launchctl(self, *args):

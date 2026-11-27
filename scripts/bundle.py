@@ -11,7 +11,7 @@ import sys
 import tempfile
 
 from configuration import ROOT
-from installation import PACKAGE_ADAPTERS, HOST_TOOLS
+from installation import PACKAGE_ADAPTERS, SUPPORT_TOOLS
 from distribution import source_payload
 from interpreter import build_runtime, copy_runtime
 from release import release_info
@@ -44,7 +44,7 @@ def main():
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / name, destination)
             files[name] = hashlib.sha256(destination.read_bytes()).hexdigest()
-    for name in PACKAGE_ADAPTERS + HOST_TOOLS:
+    for name in PACKAGE_ADAPTERS + SUPPORT_TOOLS:
         source = build / name
         subprocess.run(['codesign', '--verify', str(source)], check=True, capture_output=True, timeout=10)
         destination = support / 'build' / name
@@ -55,6 +55,9 @@ def main():
     endpoint = support / 'build/endpoint'
     shutil.copyfile(build / 'endpoint', endpoint)
     files['build/endpoint'] = hashlib.sha256(endpoint.read_bytes()).hexdigest()
+    settings = support / 'build/settings'
+    shutil.copyfile(build / 'settings', settings)
+    files['build/settings'] = hashlib.sha256(settings.read_bytes()).hexdigest()
     for path in copy_runtime(runtime, support / 'python'):
         files[str(path.relative_to(support))] = hashlib.sha256(path.read_bytes()).hexdigest()
     # The signed runtime is immutable. Cache writers must not add resources
@@ -62,15 +65,14 @@ def main():
     embedded = support / 'python'
     for path in [*embedded.rglob('*'), embedded]:
         path.chmod(path.stat().st_mode & ~0o222)
-    subprocess.run(['xcrun', 'clang', *compiler_flags(), '-fobjc-arc', '-fblocks', '-Wall', '-Wextra', '-Werror',
-                    '-framework', 'AppKit', str(ROOT / 'src/app/app.m'), str(ROOT / 'src/app/wizard.m'), str(ROOT / 'src/app/interface.m'), str(ROOT / 'src/app/logs.m'), str(ROOT / 'src/app/alerts.m'), str(ROOT / 'src/app/authorization.m'), '-o', str(executable)], check=True)
+    shutil.copy2(build / 'Mirra', executable)
     password = executable.parent / 'password'
     subprocess.run(['xcrun', 'clang', *compiler_flags(), '-fobjc-arc', '-Wall', '-Wextra', '-Werror', '-framework', 'AppKit',
-                    str(ROOT / 'src/app/password.m'), '-o', str(password)], check=True)
+                    str(ROOT / 'src/app-support/password.m'), '-o', str(password)], check=True)
     subprocess.run(['codesign', '--force', '--sign', '-', str(password)], check=True)
     artwork = build / 'artwork'
     subprocess.run(['xcrun', 'clang', *compiler_flags(), '-fobjc-arc', '-Wall', '-Wextra', '-Werror', '-framework', 'AppKit',
-                    str(ROOT / 'src/app/artwork.m'), '-o', str(artwork)], check=True)
+                    str(ROOT / 'src/app-support/artwork.m'), '-o', str(artwork)], check=True)
     icons = build / 'Mirra.iconset'
     subprocess.run([str(artwork), str(icons)], check=True)
     subprocess.run(['/usr/bin/iconutil', '-c', 'icns', str(icons), '-o', str(contents / 'Resources/Mirra.icns')], check=True)
@@ -79,7 +81,7 @@ def main():
             'CFBundlePackageType': 'APPL', 'CFBundleShortVersionString': release['version'], 'CFBundleVersion': release['build'],
             'CFBundleIconFile': 'Mirra.icns',
             'NSHighResolutionCapable': True, 'LSMinimumSystemVersion': MINIMUM_MACOS,
-            'NSLocalNetworkUsageDescription': 'Mirra connects to your selected jailbroken bridge over SSH on your local network.',
+            'NSLocalNetworkUsageDescription': 'Mirra connects to your selected bridge iPhone on your local network.',
             'SupportPython': 'Support/python/bin/python3'}
     (contents / 'Info.plist').write_bytes(plistlib.dumps(info))
     (support / 'manifest.json').write_text(json.dumps({'files': files}, indent=2) + '\n')

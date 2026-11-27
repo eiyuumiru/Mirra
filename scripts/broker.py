@@ -2,6 +2,7 @@
 """Carry native sharingd AKS requests to an isolated keybag on the configured backend."""
 import argparse
 import ctypes
+import hashlib
 import json
 import os
 import secrets
@@ -10,6 +11,7 @@ import socket
 import socketserver
 import struct
 import threading
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,10 +19,13 @@ from transport import Endpoint, EndpointError, transport_details
 from configuration import load_config
 from keystore import AksBroker
 from lifetime import watch_parent_pipe
+from certificates import validity
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--socket", type=Path, required=True)
 parser.add_argument("--state-file", type=Path, required=True)
 parser.add_argument("--config")
+parser.add_argument("--certificate", type=Path, help=argparse.SUPPRESS)
+parser.add_argument("--renewed-certificate", action="store_true", help=argparse.SUPPRESS)
 parser.add_argument('--parent-lifeline',action='store_true',help=argparse.SUPPRESS)
 args = parser.parse_args()
 configuration = load_config(args.config)
@@ -29,16 +34,24 @@ if len(os.fsencode(args.socket)) >= 104 or args.socket.exists():
 parent = args.socket.parent.stat()
 if parent.st_uid != os.getuid() or parent.st_mode & 0o077:
     raise SystemExit("Socket parent must be owned by this user with mode 0700")
-certificate_bytes = configuration.certificate_file.read_bytes()
-if not certificate_bytes:
-    raise SystemExit("Backend device certificate is empty")
-endpoint = Endpoint(configuration)
+certificate_bytes = (args.certificate or configuration.certificate_file).read_bytes()
+certificate_start, certificate_end = validity(certificate_bytes)
+# A not-yet-valid certificate is a clock problem and is rejected. A certificate
+# that is only past its notAfter is tolerated: the attested-key self-check below
+# (and the periodic health validate) is the authority on whether the enclave
+# still honors it, so an expired-but-attesting bridge keeps working.
+if time.time() < certificate_start:
+    raise SystemExit("Backend device certificate is not yet valid")
+endpoint = Endpoint(configuration, expected_certificate_sha256=hashlib.sha256(certificate_bytes).hexdigest(), saved=True)
 libc = ctypes.CDLL(None, use_errno=True)
 libc.getpeereid.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_uint), ctypes.POINTER(ctypes.c_uint)]
 libc.getpeereid.restype = ctypes.c_int
 lock = threading.Lock()
 auth_token = secrets.token_hex(32)
-broker = AksBroker(endpoint)
+# Expiry is tolerated (see the validity note above): the periodic health check
+# re-validates an attested key over the wire, which is the real signal that the
+# enclave still honors this certificate, so date alone must not fail the broker.
+broker = AksBroker(endpoint, certificate_expires_at=None)
 
 
 def readn(sock, count):
@@ -95,6 +108,12 @@ class TCPServer(socketserver.ThreadingTCPServer):
 try:
     if not endpoint.ready.get("dcrt_bytes"):
         raise RuntimeError("Backend endpoint has no device certificate")
+    restored = broker.restore(minimum_created_at=certificate_start if args.renewed_certificate else None)
+    kept = endpoint.ready.get("kept_sessions")
+    broker.can_resume_pairing = restored > 0 and type(kept) is int and kept > 0
+    print(json.dumps({"saved_mac": bool(endpoint.ready.get("client_saved")), "restored_identities": restored,
+                      "restore_failures": endpoint.ready.get("restore_failures", 0),
+                      "kept_sessions": endpoint.ready.get("kept_sessions", 0)}), flush=True)
     generated = broker.execute({"operation": "generate", "key_class": 9})
     if generated.get("status") != 0:
         raise RuntimeError("Backend cannot create an attested signing key: " + str(generated.get("status_hex", generated.get("error"))))
@@ -108,8 +127,9 @@ server = Server(str(args.socket), Request)
 args.socket.chmod(0o600)
 tcp_server = TCPServer(("127.0.0.1", 0), Request)
 certificate = args.socket.parent / "certificate.der"
-certificate.write_bytes(certificate_bytes)
-certificate.chmod(0o600)
+if args.certificate != certificate:
+    certificate.write_bytes(certificate_bytes)
+    certificate.chmod(0o600)
 if args.state_file:
     descriptor = os.open(args.state_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(descriptor, "w") as state:

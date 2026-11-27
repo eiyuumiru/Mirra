@@ -6,7 +6,6 @@ from pathlib import Path
 import re
 import shlex
 
-from bridgepaths import helper_command
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -38,6 +37,8 @@ class Config:
     seconds: int
     path_mode: str = 'native'
     decoder_route: str = 'auto'
+    service_port: int = 47820
+    token_file: Path = ROOT / 'private/bridge/token'
 
     def as_dict(self):
         value = {'schema_version':1,'backend':{
@@ -47,6 +48,7 @@ class Config:
                 'identity_file':str(self.identity_file),'known_hosts_file':str(self.known_hosts_file),
                 'host_key_alias':self.host_key_alias,'remote_endpoint':self.remote_endpoint,
                 'remote_certificate':self.remote_certificate,'timeout_seconds':self.timeout},
+            'service':{'port':self.service_port,'token_file':str(self.token_file)},
             'certificate_file':str(self.certificate_file)},
             'host':{'runtime_directory':str(self.runtime_directory),'system_app':str(self.system_app)},
             'session':{'seconds':self.seconds}}
@@ -56,7 +58,8 @@ class Config:
             value['host']['decoder_route'] = self.decoder_route
         return value
 
-    def ssh_command(self, remote_arguments=None):
+    def ssh_command(self, remote_arguments):
+        """SSH is used only during setup, to install and configure the bridge service."""
         try:
             user = self.user_file.read_text().strip()
         except OSError as error:
@@ -72,8 +75,7 @@ class Config:
         if self.host_key_alias:
             command += ['-o', 'HostKeyAlias='+self.host_key_alias]
         # OpenSSH invokes a remote shell even when the local call uses argv.
-        arguments = (helper_command([self.remote_endpoint, self.remote_certificate], self.path_mode)
-                     if remote_arguments is None else list(remote_arguments))
+        arguments = list(remote_arguments)
         if not arguments or any(not isinstance(value, str) or '\x00' in value for value in arguments):
             raise ConfigError('Remote command must contain text arguments without NUL bytes')
         return command + [host, shlex.join(arguments)]
@@ -123,7 +125,8 @@ def load_config(path=None, *, root=ROOT):
     _object(raw, ['schema_version','backend','host','session'], 'configuration')
     if type(raw.get('schema_version',1)) is not int or raw.get('schema_version',1) != 1:
         raise ConfigError('Unsupported configuration schema_version')
-    backend = _object(raw.get('backend',{}), ['transport','usb','ssh','certificate_file'], 'backend')
+    backend = _object(raw.get('backend',{}), ['transport','usb','ssh','service','certificate_file'], 'backend')
+    service = _object(backend.get('service',{}), ['port','token_file'], 'backend.service')
     usb = _object(backend.get('usb',{}), ['product_type','serial','listen_port','device_port'], 'backend.usb')
     ssh = _object(backend.get('ssh',{}), ['host','port','user_file','identity_file','known_hosts_file',
         'host_key_alias','remote_endpoint','remote_certificate','timeout_seconds','path_mode'], 'backend.ssh')
@@ -173,4 +176,6 @@ def load_config(path=None, *, root=ROOT):
         local(backend.get('certificate_file','private/bridge/certificate.der'),'backend.certificate_file'),
         local(host.get('runtime_directory','runtime/host'),'host.runtime_directory'),
         local(host.get('system_app','/System/Applications/iPhone Mirroring.app'),'host.system_app'),
-        _integer(session.get('seconds',1800),30,1800,'session.seconds'), path_mode, decoder_route)
+        _integer(session.get('seconds',1800),30,1800,'session.seconds'), path_mode, decoder_route,
+        _integer(service.get('port',47820),1,65535,'backend.service.port'),
+        local(service.get('token_file','private/bridge/token'),'backend.service.token_file'))

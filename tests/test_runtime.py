@@ -1,9 +1,7 @@
-import importlib.util
 import errno
 import json
 from pathlib import Path
 import shlex
-import subprocess
 import sys
 import tempfile
 import time
@@ -15,6 +13,8 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
 from transport import Endpoint,EndpointError,MAX_REPLY
 from configuration import ConfigError,load_config
 from usbmux import select_device
+from bridgepaths import helper_command
+from bridgefixture import BridgeFixture, GREETING
 
 
 class ConfigurationTests(unittest.TestCase):
@@ -46,7 +46,7 @@ class ConfigurationTests(unittest.TestCase):
         c = self.config({'backend':{'transport':'ssh','ssh':{'host':'192.0.2.5','port':2223,
             'host_key_alias':'owned-backend','user_file':'user','remote_endpoint':remote}}})
         c.user_file.write_text('mobile\n')
-        command = c.ssh_command()
+        command = c.ssh_command(helper_command([c.remote_endpoint, c.remote_certificate], c.path_mode))
         self.assertIn('StrictHostKeyChecking=yes',command)
         self.assertIn('HostKeyAlias=owned-backend',command)
         self.assertEqual(command[-2],'192.0.2.5')
@@ -55,7 +55,7 @@ class ConfigurationTests(unittest.TestCase):
     def test_usb_port_overrides_ssh_port(self):
         c = self.config({'backend':{'transport':'usb','usb':{'product_type':'iPhone11,2','listen_port':2323},'ssh':{'port':8888,'user_file':'user'}}})
         c.user_file.write_text('mobile')
-        command = c.ssh_command()
+        command = c.ssh_command(helper_command([c.remote_endpoint, c.remote_certificate], c.path_mode))
         self.assertEqual(command[command.index('-p')+1],'2323')
         self.assertEqual(command[-2],'127.0.0.1')
 
@@ -63,7 +63,7 @@ class ConfigurationTests(unittest.TestCase):
         c = self.config({'backend':{'ssh':{'known_hosts_file':'Application Support/backend/known_hosts',
                                          'user_file':'user'}}})
         c.user_file.write_text('mobile')
-        option = next(arg for arg in c.ssh_command() if arg.startswith('UserKnownHostsFile='))
+        option = next(arg for arg in c.ssh_command(helper_command([c.remote_endpoint, c.remote_certificate], c.path_mode)) if arg.startswith('UserKnownHostsFile='))
         # Protect the nested configuration-value boundary, in addition to argv.
         # The installed-path live SSH test separately verifies OpenSSH behavior.
         self.assertEqual(shlex.split(option.partition('=')[2]),[str(c.known_hosts_file)])
@@ -93,7 +93,7 @@ class ConfigurationTests(unittest.TestCase):
         original = self.config({'backend': {'ssh': {'path_mode': 'roothide', 'user_file': 'user',
             'remote_endpoint': "/usr/local/libexec/Mirra/endpoint 'with' spaces"}}})
         original.user_file.write_text('root')
-        command = original.ssh_command()
+        command = original.ssh_command(helper_command([original.remote_endpoint, original.remote_certificate], original.path_mode))
         arguments = shlex.split(command[-1])
         self.assertEqual(arguments[-2:], [original.remote_endpoint, original.remote_certificate])
         self.assertIn('jbroot', arguments[2])
@@ -142,178 +142,161 @@ class USBSelectionTests(unittest.TestCase):
 
 
 class TransportTests(unittest.TestCase):
-    def endpoint(self,program,timeout=.3):
-        endpoint = Endpoint(command=[sys.executable,'-u','-c',program],timeout=timeout)
-        self.addCleanup(endpoint.close)
-        return endpoint
+    def bridge(self, handler=None, **kwargs):
+        fixture = BridgeFixture(handler, **kwargs)
+        fixture.__enter__()
+        self.addCleanup(fixture.__exit__, None, None, None)
+        return fixture
 
     def test_unready_greeting_preserves_known_capability_failure_without_secrets(self):
         greeting = {'ready': False, 'error': 'required_keystore_symbols_unavailable',
                     'missing_symbols': ['aks_remote_session'], 'os_version': '15.8.4',
                     'process_architecture': 'arm64', 'serial': 'private-serial', 'dcrt': 'private-certificate'}
-        program = 'import json; print(json.dumps(' + repr(greeting) + '), flush=True)'
+        bridge = self.bridge(greeting=greeting)
         with self.assertRaises(EndpointError) as caught:
-            self.endpoint(program)
+            bridge.connect()
         self.assertEqual(caught.exception.code, greeting['error'])
         self.assertEqual(caught.exception.details['capabilities']['missing_symbols'], ['aks_remote_session'])
         self.assertNotIn('private-', json.dumps(caught.exception.details))
+        self.assertTrue(bridge.closed.wait(1))
 
     def test_mismatched_certificate_and_unknown_protocol_are_rejected(self):
-        greetings = [({'ready': True, 'dcrt_sha256': 'a' * 64}, 'b' * 64),
-                     ({'ready': True, 'protocol_version': 2}, None)]
-        for greeting, expected in greetings:
-            program = 'import time; print(' + repr(json.dumps(greeting)) + ',flush=True); time.sleep(30)'
-            with self.subTest(greeting=greeting), self.assertRaises(EndpointError):
-                Endpoint(command=[sys.executable,'-u','-c',program], timeout=.3,
-                         expected_certificate_sha256=expected)
+        greetings = [dict(GREETING, protocol_version=1), dict(GREETING, dcrt_sha256='a' * 64)]
+        for greeting in greetings:
+            with self.subTest(greeting=greeting):
+                bridge = self.bridge(greeting=greeting)
+                with self.assertRaises(EndpointError):
+                    bridge.connect()
+                self.assertTrue(bridge.closed.wait(1))
 
     def test_missing_fingerprint_does_not_satisfy_explicit_certificate_binding(self):
-        with self.assertRaises(EndpointError):
-            Endpoint(command=[sys.executable,'-u','-c','import time; print(\'{"ready":true}\',flush=True); time.sleep(30)'],
-                     timeout=.3, expected_certificate_sha256='a' * 64)
+        bridge = self.bridge(greeting={'ready': True, 'protocol_version': 2})
+        with self.assertRaisesRegex(EndpointError, 'certificates do not match'):
+            bridge.connect(expected_certificate_sha256='a' * 64)
 
-    def test_multiple_buffered_lines_are_not_lost(self):
-        e = self.endpoint('import os,time; os.write(1,b\'{"ready":true}\\n{"status":0}\\n\'); time.sleep(30)')
-        self.assertEqual(e.call('validate'),{'status':0})
-        e._failed = True
-
-    def test_stderr_flood_does_not_fill_disk_or_block_protocol(self):
-        e = self.endpoint('''import os, sys, json
-for _ in range(320): os.write(2,b'x'*16384)
-print('{"ready":true}',flush=True)
-for line in sys.stdin:
- request=json.loads(line)
- for _ in range(320): os.write(2,b'y'*16384)
- print('{"status":0}',flush=True)
- if request['operation']=='exit':break
-''', timeout=5)
-        self.assertEqual(e.call('validate'), {'status': 0})
-        tail, total = e._stderr.snapshot()
-        self.assertGreaterEqual(total, 9 * 1024 * 1024)
-        self.assertLessEqual(len(tail), 65536)
-        self.assertEqual(tail, b'y' * len(tail))
-        e.close()
-        self.assertEqual(e.process.returncode, 0)
-        self.assertFalse(e._stderr.thread.is_alive())
+    def test_multiple_buffered_frames_are_not_lost(self):
+        bridge = self.bridge(lambda request, peer: None, initial=({'status': 0},))
+        endpoint = bridge.connect()
+        self.assertEqual(endpoint.call('validate'), {'status': 0})
+        endpoint._failed = True  # The fixture intentionally has no exit reply.
 
     def test_roundtrip_and_graceful_close(self):
-        e = self.endpoint('''import json,sys
-print(json.dumps({'ready':True}))
-for line in sys.stdin:
- r=json.loads(line); print(json.dumps({'operation':r['operation'],'status':0}),flush=True)
- if r['operation']=='exit':break
-''')
-        self.assertEqual(e.call('validate')['operation'],'validate')
-        e.close()
-        self.assertEqual(e.process.returncode,0)
+        bridge = self.bridge(lambda request, peer: {'operation': request['operation'], 'status': 0})
+        endpoint = bridge.connect()
+        self.assertTrue(endpoint.certificate_binding_verified)
+        self.assertEqual(endpoint.call('validate')['operation'], 'validate')
+        endpoint.close()
+        endpoint.close()
+        self.assertTrue(bridge.closed.wait(1))
+        self.assertEqual([r['operation'] for r in bridge.requests], ['validate', 'exit'])
+        self.assertEqual(endpoint.socket.stream.fileno(), -1)
 
     def test_partial_response_times_out_and_poisoned_session_is_not_reused(self):
-        e = self.endpoint('''import sys,time
-print('{"ready":true}',flush=True)
-sys.stdin.readline(); sys.stdout.write('{"status":');sys.stdout.flush();time.sleep(30)
-''')
+        def partial(request, peer):
+            peer.stream.sendall(bytes((0x81, 12)) + b'{"status":')
+            peer.stop.wait(5)
+        bridge = self.bridge(partial, timeout=.15)
+        endpoint = bridge.connect()
         started = time.monotonic()
-        with self.assertRaisesRegex(EndpointError,'timed out') as caught:
-            e.call('generate')
+        with self.assertRaisesRegex(EndpointError, 'timed out') as caught:
+            endpoint.call('generate')
         self.assertEqual(caught.exception.code, 'endpoint_reply_timeout')
-        self.assertEqual(caught.exception.details['reply_bytes'], len(b'{"status":'))
         self.assertEqual(caught.exception.details['operation'], 'generate')
-        self.assertIs(e.failure, caught.exception)
-        self.assertLess(time.monotonic()-started,2)
-        with self.assertRaisesRegex(EndpointError,'unavailable'):
-            e.call('validate')
-        self.assertIs(e.failure, caught.exception)
-        e.close()
-        self.assertIsNotNone(e.process.poll())
+        self.assertIs(endpoint.failure, caught.exception)
+        self.assertLess(time.monotonic() - started, 1)
+        with self.assertRaisesRegex(EndpointError, 'unavailable'):
+            endpoint.call('validate')
+        self.assertIs(endpoint.failure, caught.exception)
+        endpoint.close()
+        self.assertEqual(endpoint.socket.stream.fileno(), -1)
 
     def test_invalid_and_oversized_replies_are_rejected(self):
-        for reply in ['[]','invalid','x'*(MAX_REPLY+1)]:
+        for reply in (b'[]', b'invalid', b'x' * (MAX_REPLY + 1)):
             with self.subTest(length=len(reply)):
-                program="import sys,time; print('{\"ready\":true}',flush=True); sys.stdin.readline(); print("+repr(reply)+",flush=True); time.sleep(30)"
-                # Keep the huge sample out of argv limits.
-                if len(reply)>MAX_REPLY:
-                    program="import sys,time; print('{\"ready\":true}',flush=True); sys.stdin.readline(); print('x'*262145,flush=True); time.sleep(30)"
-                e = self.endpoint(program)
-                with self.assertRaises(EndpointError) as caught:e.call('validate')
-                expected = 'endpoint_reply_too_large' if len(reply)>MAX_REPLY else 'endpoint_invalid_reply'
+                bridge = self.bridge(lambda request, peer: reply)
+                endpoint = bridge.connect()
+                with self.assertRaises(EndpointError) as caught:
+                    endpoint.call('validate')
+                expected = 'endpoint_reply_too_large' if len(reply) > MAX_REPLY else 'endpoint_invalid_reply'
                 self.assertEqual(caught.exception.code, expected)
-                e.close()
-                self.assertIsNotNone(e.process.poll())
+                self.assertEqual(caught.exception.details['operation'], 'validate')
+                with self.assertRaisesRegex(EndpointError, 'unavailable'):
+                    endpoint.call('validate')
+                endpoint.close()
 
-    def test_eof_and_an_already_exited_process_have_distinct_errors(self):
-        e = self.endpoint('''import os,sys,time
-print('{"ready":true}',flush=True)
-sys.stdin.readline();os.close(1);time.sleep(30)
-''')
+    def test_eof_and_an_observed_disconnect_have_distinct_errors(self):
+        def eof(request, peer):
+            peer.stream.close()
+        endpoint = self.bridge(eof).connect()
         with self.assertRaises(EndpointError) as caught:
-            e.call('validate')
+            endpoint.call('validate')
         self.assertEqual(caught.exception.code, 'endpoint_eof')
         self.assertNotIn('exit_code', caught.exception.details)
-        e.close()
-        exited = self.endpoint('print(\'{"ready":true}\',flush=True);raise SystemExit(23)')
-        exited.process.wait(timeout=2)
+        endpoint.close()
+        closed = self.bridge(before_requests=lambda peer: peer.stream.close())
+        endpoint = closed.connect()
+        self.assertTrue(closed.closed.wait(1))
+        self.assertEqual(endpoint.poll(), 0)
         with self.assertRaises(EndpointError) as caught:
-            exited.call('validate')
-        self.assertEqual(caught.exception.code, 'endpoint_process_exited')
-        self.assertEqual(caught.exception.details['exit_code'], 23)
+            endpoint.call('validate')
+        self.assertEqual(caught.exception.code, 'endpoint_disconnected')
 
-    def test_a_full_input_pipe_reports_a_write_timeout(self):
-        e = self.endpoint('import time;print(\'{"ready":true}\',flush=True);time.sleep(30)')
+    def test_a_stalled_socket_reports_a_write_timeout_without_request_material(self):
+        bridge = self.bridge(timeout=.15, before_requests=lambda peer: peer.stop.wait(5))
+        endpoint = bridge.connect()
         with self.assertRaises(EndpointError) as caught:
-            e.call('setup', data='x' * (MAX_REPLY - 256))
+            endpoint.call('setup', data='x' * (MAX_REPLY - 256))
         self.assertEqual(caught.exception.code, 'endpoint_write_timeout')
-        self.assertLess(caught.exception.details['written_bytes'], caught.exception.details['request_bytes'])
+        self.assertGreater(caught.exception.details['request_bytes'], 200000)
         self.assertNotIn('x' * 32, json.dumps(caught.exception.details))
 
-    def test_io_errors_keep_errno_and_abandon_the_stream(self):
-        e = self.endpoint('import time;print(\'{"ready":true}\',flush=True);time.sleep(30)')
-        with patch('transport.os.write', side_effect=OSError(errno.EPIPE, 'private input')), \
+    def test_io_errors_report_the_stage_and_abandon_the_socket(self):
+        endpoint = self.bridge().connect()
+        with patch.object(endpoint.socket, 'send_text', side_effect=OSError(errno.EPIPE, 'private input')), \
                 self.assertRaises(EndpointError) as caught:
-            e.call('validate')
+            endpoint.call('validate')
         self.assertEqual(caught.exception.code, 'endpoint_io_error')
-        self.assertEqual(caught.exception.details['errno'], errno.EPIPE)
         self.assertEqual(caught.exception.details['stage'], 'write')
         self.assertNotIn('private input', json.dumps(caught.exception.details))
         with self.assertRaisesRegex(EndpointError, 'unavailable'):
-            e.call('validate')
+            endpoint.call('validate')
 
     def test_wrapping_keeps_existing_error_code_and_details(self):
-        e = self.endpoint('import time;print(\'{"ready":true}\',flush=True);time.sleep(30)')
+        endpoint = self.bridge().connect()
         error = EndpointError('Known failure', 'known_failure', {'stage': 'known_stage'})
-        with patch.object(e, 'read', side_effect=error), self.assertRaises(EndpointError) as caught:
-            e.call('validate')
+        with patch.object(endpoint, 'read', side_effect=error), self.assertRaises(EndpointError) as caught:
+            endpoint.call('validate')
         self.assertEqual(caught.exception.code, error.code)
         self.assertEqual(caught.exception.details['stage'], 'known_stage')
+        self.assertIs(endpoint.failure, caught.exception)
 
-    def test_failed_start_reaps_child(self):
-        children=[]
-        original=subprocess.Popen
-        def spawn(*a,**kw):
-            process=original(*a,**kw);children.append(process);return process
-        with patch('transport.subprocess.Popen',side_effect=spawn):
-            with self.assertRaises(EndpointError):
-                Endpoint(command=[sys.executable,'-u','-c',"import time;print('{\"ready\":false}',flush=True);time.sleep(30)"],timeout=.3)
-        self.assertEqual(len(children),1)
-        self.assertIsNotNone(children[0].poll())
+    def test_failed_start_closes_its_socket(self):
+        bridge = self.bridge(greeting={'ready': False})
+        with self.assertRaises(EndpointError):
+            bridge.connect()
+        self.assertTrue(bridge.closed.wait(1))
+        self.assertEqual(bridge.websocket.stream.fileno(), -1)
 
     def test_close_interrupts_an_inflight_request(self):
-        e=self.endpoint('''import sys,time
-print('{"ready":true}',flush=True)
-sys.stdin.readline();time.sleep(30)
-''',timeout=20)
-        errors=[]
+        bridge = self.bridge(lambda request, peer: peer.stop.wait(5) and None, timeout=20)
+        endpoint = bridge.connect()
+        errors = []
         def pending():
-            try:e.call('validate')
-            except EndpointError as error:errors.append(str(error))
-        thread=threading.Thread(target=pending);thread.start()
-        deadline=time.monotonic()+2
-        while not e._lock.locked() and time.monotonic()<deadline:time.sleep(.01)
-        self.assertTrue(e._lock.locked())
-        start=time.monotonic();e.close();thread.join(timeout=2)
-        self.assertLess(time.monotonic()-start,5)
+            try:
+                endpoint.call('validate')
+            except EndpointError as error:
+                errors.append(str(error))
+        thread = threading.Thread(target=pending)
+        thread.start()
+        self.assertTrue(bridge.request_received.wait(1))
+        self.assertIsNone(endpoint.poll())
+        started = time.monotonic()
+        endpoint.close()
+        thread.join(2)
+        self.assertLess(time.monotonic() - started, 3)
         self.assertFalse(thread.is_alive())
         self.assertTrue(errors)
 
 
-if __name__=='__main__':
+if __name__ == '__main__':
     unittest.main()

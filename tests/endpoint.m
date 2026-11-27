@@ -129,6 +129,29 @@ static BOOL check_generation(void) {
     return YES;
 }
 
+static BOOL check_saved_pairing_cleanup(void) {
+    KeyStore keys = {.reset_session = record_reset};
+    NSArray *same = @[@"local", @"remote", @0x81];
+    NSArray *other = @[@"local", @"other", @0x81];
+    NSMutableSet *sessions = [NSMutableSet setWithArray:@[@1, @2, @3, @4, @5]];
+    NSMutableDictionary *kinds = [@{
+        @1: @{@"peer": same, @"confirmed": @YES, @"order": @1},
+        @2: @{@"peer": same, @"confirmed": @YES, @"order": @2},
+        @3: @{@"peer": other, @"confirmed": @YES, @"order": @3},
+        @4: @{@"peer": same, @"order": @4},
+        @5: @{@"flags": @0xff, @"order": @5}
+    } mutableCopy];
+    reset_status = -123;
+    prune_saved_pairing_sessions(sessions, kinds, &keys, NO);
+    if (sessions.count != 5 || kinds.count != 5) return NO;
+    reset_status = 0;
+    prune_saved_pairing_sessions(sessions, kinds, &keys, NO);
+    if ([sessions containsObject:@1] || kinds[@1] || ![sessions containsObject:@4]) return NO;
+    prune_saved_pairing_sessions(sessions, kinds, &keys, YES);
+    return [sessions isEqual:[NSSet setWithArray:@[@2, @3, @5]]] &&
+        !kinds[@4] && kinds.count == sessions.count;
+}
+
 int main(void) {
     @autoreleasepool {
         NSMutableSet *owned = [NSMutableSet setWithArray:@[@17, @91]];
@@ -152,7 +175,7 @@ int main(void) {
         KeyStore keys = {0};
         symbol_calls = fallback_calls = 0;
         missing = load_keystore(&keys, (void *)1, fake_symbol, fake_fallback);
-        if (missing.count || symbol_calls != 18 || fallback_calls != 1 ||
+        if (missing.count || symbol_calls != 21 || fallback_calls != 1 ||
             (void *)keys.reset_session != (void *)record_reset ||
             (void *)keys.remote_session != (void *)fake_fallback) return 8;
         // Unsupported maps retain the original error list and available APIs.
@@ -164,10 +187,11 @@ int main(void) {
         if (missing.count != 18 || symbol_calls || keys.reset_session || keys.remote_session) return 10;
         fallback_calls = 0;
         missing = load_keystore(&keys, NULL, fake_symbol, fake_fallback);
-        if (missing.count != 17 || symbol_calls || fallback_calls != 18 ||
+        if (missing.count != 17 || symbol_calls || fallback_calls != 21 ||
             (void *)keys.remote_session != (void *)fake_fallback || keys.reset_session) return 11;
         if (!check_generation()) return 12;
-        puts("{\"cases\":22,\"passed\":true,\"real_aks_accessed\":false}");
+        if (!check_saved_pairing_cleanup()) return 13;
+        puts("{\"cases\":23,\"passed\":true,\"real_aks_accessed\":false}");
     }
     return 0;
 }

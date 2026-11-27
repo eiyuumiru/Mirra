@@ -158,7 +158,11 @@ static NSData *fake_copy(NSError *__autoreleasing *error) {
         return nil;
     }
     if (!strcmp(setting("MIRRA_SIM_CERT_TYPE", ""), "invalid")) return (id)NSNull.null;
-    return [NSMutableData dataWithLength:(NSUInteger)strtoul(setting("MIRRA_SIM_CERT_SIZE", "1024"), NULL, 10)];
+    NSMutableData *data = [NSMutableData dataWithLength:(NSUInteger)strtoul(setting("MIRRA_SIM_CERT_SIZE", "1024"), NULL, 10)];
+    int changes_after = atoi(setting("MIRRA_SIM_CERT_CHANGES_AFTER", "0"));
+    if (data.length && changes_after > 0 && [calls[@"MAECopyDCRTWithError"] intValue] > changes_after)
+        ((uint8_t *)data.mutableBytes)[0] = 1;
+    return data;
 }
 static void fake_issue(NSDictionary *options, void *context, void (^callback)(NSError *)) {
     (void)options; (void)context;
@@ -235,6 +239,7 @@ static void *fake_symbol(void *library, const char *name) {
 #define sysctlbyname fake_sysctl
 #define NSDate SimulatedClock
 #define NSRunLoop SimulatedRunLoop
+#define MIRRA_NO_PREFERENCES 1
 #define main mirra_endpoint_main
 #include "../src/phone/endpoint.m"
 #undef main

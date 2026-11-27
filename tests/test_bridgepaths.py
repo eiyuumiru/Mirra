@@ -12,7 +12,6 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from bridgepaths import ENVIRONMENT_SCRIPT, helper_command
 from provisioning import RemoteSetupError, remote_helper
-from transport import Endpoint
 
 
 class BridgePathTests(unittest.TestCase):
@@ -148,32 +147,20 @@ print(json.dumps({'argv':sys.argv, 'sha256':hashlib.sha256(data).hexdigest()}))
         self.assertEqual(report['argv'], [str(physical), '--export-certificate', str(target)])
         self.assertEqual(report['sha256'], hashlib.sha256(payload).hexdigest())
 
-    def test_live_endpoint_preserves_binding_request_stream_and_new_jailbreak_root(self):
-        certificate = '/var/mobile/certificate.der'
-        payload = b'fixture binding bytes'
-        target = self.data / certificate.lstrip('/'); target.parent.mkdir(parents=True); target.write_bytes(payload)
-        virtual, physical = self.helper('''import hashlib,json,sys
-from pathlib import Path
-print(json.dumps({'ready':True,'protocol_version':1,'dcrt_sha256':hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest()}),flush=True)
-for line in sys.stdin:
-    request=json.loads(line)
-    if request['operation']=='exit':
-        print('{"closed":true}',flush=True); break
-    print(json.dumps({'status':0,'echo':request}),flush=True)
-''')
-        digest = hashlib.sha256(payload).hexdigest()
-        args = helper_command([virtual, certificate], 'roothide')
-        # Exercise the real transport against the launched child. This protects
-        # stdout framing and certificate binding, not just generated strings.
-        with patch.dict(os.environ, self.env):
-            with Endpoint(command=args, timeout=2, expected_certificate_sha256=digest) as endpoint:
-                result = endpoint.call('sign', payload='literal $() and quotes')
-                self.assertEqual(result['echo']['payload'], 'literal $() and quotes')
-        moved = self.root / 'new jailbreak bundle'; self.bundle.rename(moved)
+    def test_capability_launch_resolves_a_new_jailbreak_root(self):
+        virtual, physical = self.helper('import json,sys\nprint(json.dumps({"argv":sys.argv,"required_symbols_available":True}))\n')
+        args = helper_command([virtual, '--capabilities'], 'roothide')
+        first = self.run_command(args)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(json.loads(first.stdout)['argv'], [str(physical), '--capabilities'])
+        moved = self.root / 'new jailbreak bundle'
+        self.bundle.rename(moved)
         self.env['MIRRA_TEST_BUNDLE'] = str(moved)
-        with patch.dict(os.environ, self.env):
-            with Endpoint(command=args, timeout=2, expected_certificate_sha256=digest) as endpoint:
-                self.assertTrue(endpoint.ready['ready'])
+        second = self.run_command(args)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(json.loads(second.stdout)['argv'], [str(moved / physical.relative_to(self.bundle)), '--capabilities'])
+        self.assertTrue(json.loads(second.stdout)['required_symbols_available'])
+        self.assertFalse((self.root / 'unwanted').exists())
 
     def test_actual_child_signal_is_captured_instead_of_ssh_handshake_noise(self):
         virtual, _ = self.helper('import os,signal\nos.kill(os.getpid(),signal.SIGKILL)\n')

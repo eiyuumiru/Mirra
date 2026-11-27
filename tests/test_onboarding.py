@@ -1,5 +1,6 @@
 import base64
 from dataclasses import replace
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -113,6 +114,51 @@ class OnboardingTests(unittest.TestCase):
             stop.assert_not_called(); install.assert_not_called()
         self.assertEqual(SetupWizard(service=self.service).describe()['phase'], 'ready')
 
+    def test_pairing_prepares_a_resumable_profile_without_ssh_or_activation(self):
+        token = 'ABCD-EFGH-JKMN-PQRS-TVWX-YZ12'
+        certificate = b'fixture certificate'
+        digest = hashlib.sha256(certificate).hexdigest()
+        bridge = {'certificate_available': True, 'dcrt_sha256': digest}
+        for settings in ({'transport': 'ssh', 'host': '192.0.2.5', 'port': '47821'},
+                         {'transport': 'usb', 'serial': 'EXAMPLE-A11', 'product_type': 'iPhone10,5'}):
+            with self.subTest(transport=settings['transport']), \
+                    patch('provisioning.wait_for_service', return_value=bridge) as verify_service, \
+                    patch('provisioning.request', return_value=(200, 'application/octet-stream', certificate)), \
+                    patch('provisioning.verify_key') as verify_key, patch('onboarding.new_profile') as ssh, \
+                    patch.object(self.service, 'stop') as stop, patch.object(self.service, 'install') as install:
+                result = self.wizard.pair_existing({**settings, 'token': token})
+                config, normalized = verify_service.call_args.args
+                _, _, ready = self.wizard.paths(result['id'])
+                saved = load_config(ready)
+                self.assertEqual(config.transport, settings['transport'])
+                self.assertEqual(config.service_port, int(settings.get('port', 47820)))
+                self.assertEqual(config.serial, settings.get('serial', ''))
+                self.assertEqual(normalized, token.replace('-', ''))
+                self.assertEqual(saved.certificate_file.read_bytes(), certificate)
+                self.assertEqual(saved.token_file.read_text().strip(), token)
+                self.assertEqual(saved.token_file.stat().st_mode & 0o777, 0o600)
+                self.assertFalse(saved.identity_file.exists())
+                verify_key.assert_called_once_with(saved, digest, normalized)
+                self.assertEqual((result['mode'], result['phase']), ('existing', 'ready'))
+                self.assertNotIn(normalized, json.dumps(result))
+                self.assertEqual(SetupWizard(service=self.service).describe()['id'], result['id'])
+                ssh.assert_not_called()
+                stop.assert_not_called()
+                install.assert_not_called()
+
+    def test_rejected_pairing_leaves_the_previous_saved_setup_intact(self):
+        before = self.begin()
+        directories = set(self.wizard.base.iterdir())
+        token = 'ABCDEFGHJKMNPQRSTVWXYZ12'
+        with patch('onboarding.pair', side_effect=RemoteSetupError(token, 'bridge_token_rejected')):
+            with self.assertRaises(RemoteSetupError) as caught:
+                self.wizard.pair_existing({**self.settings, 'token': token})
+        failure = self.wizard.failure(None, 'pair', caught.exception)
+        self.assertEqual(failure['error_code'], 'bridge_token_rejected')
+        self.assertNotIn(token, json.dumps(failure))
+        self.assertEqual(self.wizard.describe(), before)
+        self.assertEqual(set(self.wizard.base.iterdir()), directories)
+
     def test_ready_profile_resume_rechecks_wire_compatibility_without_redeploying(self):
         state = self.authorize_stage()
         saved = self.wizard.load(); saved['phase'] = 'deploy'; self.wizard.save(saved)
@@ -130,10 +176,27 @@ class OnboardingTests(unittest.TestCase):
 
     def test_failed_enable_preserves_ready_setup_for_retry(self):
         state = self.authorize_stage(); saved = self.wizard.load(); saved['phase'] = 'ready'; self.wizard.save(saved)
-        _, access, ready = self.wizard.paths(state['id']); write_state(ready, load_config(access).as_dict())
+        _, access, ready = self.wizard.paths(state['id'])
+        config = load_config(access)
+        config.certificate_file.write_bytes(b'fixture-certificate')
+        config.token_file.write_text('ABCDEFGHJKMNPQRSTVWXYZ12\n')
+        write_state(ready, config.as_dict())
         with patch.object(self.service, 'stop', side_effect=RuntimeError('Cleanup still running')), \
                 patch.object(self.service, 'prepare') as prepare:
             with self.assertRaises(RuntimeError): self.wizard.finish(state['id'])
+            prepare.assert_not_called()
+        self.assertEqual(self.wizard.load()['phase'], 'ready')
+
+    def test_finish_validates_credentials_before_stopping_support(self):
+        state = self.authorize_stage(); saved = self.wizard.load(); saved['phase'] = 'ready'; self.wizard.save(saved)
+        _, access, ready = self.wizard.paths(state['id'])
+        config = load_config(access)
+        write_state(ready, config.as_dict())  # Missing token_file and certificate_file on disk.
+        with patch.object(self.service, 'stop') as stop, \
+                patch.object(self.service, 'prepare') as prepare:
+            with self.assertRaisesRegex(RuntimeError, 'token_file|certificate_file'):
+                self.wizard.finish(state['id'])
+            stop.assert_not_called()
             prepare.assert_not_called()
         self.assertEqual(self.wizard.load()['phase'], 'ready')
 

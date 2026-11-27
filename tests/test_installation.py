@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from configuration import load_config
-from installation import NativeService, PACKAGE_ADAPTERS, HOST_TOOLS, PACKAGE_SCHEMA, SUPPORT_REVISION
+from installation import NativeService, PACKAGE_ADAPTERS, SUPPORT_TOOLS, PACKAGE_SCHEMA, SUPPORT_REVISION, CLI_NAME, BRIDGE_UPDATE_FILES
 from state import write_state
 from test_interpreter import fixture_runtime
 
@@ -29,12 +29,16 @@ class NativeServiceTests(unittest.TestCase):
         (self.source / 'scripts/native.py').write_text('print("test fixture")\n')
         for name in ('decoder.py', 'decoder_route.py', 'startup.py'):
             (self.source / 'scripts' / name).write_text('# test fixture\n')
-        for name in PACKAGE_ADAPTERS + HOST_TOOLS:
+        for name in PACKAGE_ADAPTERS + SUPPORT_TOOLS:
             (self.source / 'build' / name).write_bytes(b'test fixture only')
+        for name in BRIDGE_UPDATE_FILES:
+            path = self.source / name
+            path.parent.mkdir(exist_ok=True)
+            path.write_bytes(b'test fixture only')
         fixture_runtime(self.source / 'python')
         (self.source / 'config.json').write_text('{}')
         self.config = replace(load_config(self.source / 'config.json', root=self.source), transport='usb', product_type='iPhone11,2')
-        for name in ['user_file', 'identity_file', 'known_hosts_file', 'certificate_file']:
+        for name in ['user_file', 'identity_file', 'known_hosts_file', 'certificate_file', 'token_file']:
             path = getattr(self.config, name)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(b'private test fixture')
@@ -129,8 +133,8 @@ class NativeServiceTests(unittest.TestCase):
         fixture_runtime(self.source / 'python')
         self.prepare()
         self.assertEqual(self.service.validate_package()['schema_version'], PACKAGE_SCHEMA)
-        executable = self.service.package / 'python/bin/python3'
-        self.assertEqual(self.service.definition(self.config)['ProgramArguments'][0], str(executable))
+        executable = self.service.package / 'build' / CLI_NAME
+        self.assertEqual(self.service.definition(self.config)['ProgramArguments'], [str(executable), 'run-service'])
         (self.source / 'python/bin/python3').write_bytes(b'changed source')
         self.service.validate_package()
 
@@ -195,11 +199,11 @@ class NativeServiceTests(unittest.TestCase):
                 self.prepare()
         self.assertFalse(self.service.package.exists())
 
-    def test_usb_and_ssh_service_definitions_use_appropriate_transport(self):
+    def test_usb_and_wifi_use_the_same_login_job(self):
         usb = self.service.definition(self.config)
         ssh = self.service.definition(replace(self.config, transport='ssh'))
-        self.assertIn('--manage-usb', usb['ProgramArguments'])
-        self.assertNotIn('--manage-usb', ssh['ProgramArguments'])
+        self.assertEqual(usb, ssh)
+        self.assertTrue(usb['RunAtLoad'])
         self.assertTrue(usb['KeepAlive'])
         self.assertEqual(usb['LimitLoadToSessionType'], 'Aqua')
         self.assertGreaterEqual(usb['ExitTimeOut'], 100)
@@ -230,10 +234,9 @@ class NativeServiceTests(unittest.TestCase):
         self.assertEqual(installed.transport, replacement)
         self.assertEqual(plistlib.loads(self.service.plist.read_bytes()), self.service.definition(installed))
         self.assertEqual(self.service.plist.stat().st_mode & 0o777, 0o600)
-        backup = Path(result['previous_plist'])
-        self.assertEqual(backup.read_bytes(), previous)
-        self.assertEqual(backup.stat().st_mode & 0o777, 0o600)
-        self.assertEqual(len(list(self.service.base.glob('service.previous.*.plist'))), 1)
+        self.assertNotIn('previous_plist', result)
+        self.assertEqual(self.service.plist.read_bytes(), previous)
+        self.assertFalse(list(self.service.base.glob('service.previous.*.plist')))
         self.assertNotIn('previous_plist', again)
         packages = list(self.service.base.glob('previous-*'))
         self.assertEqual(len(packages), 1)
@@ -260,7 +263,7 @@ class NativeServiceTests(unittest.TestCase):
         self.prepare()
         previous = load_config(self.service.package / 'config.json')
         credentials = {name: getattr(previous, name).read_bytes() for name in
-                       ('identity_file', 'user_file', 'known_hosts_file', 'certificate_file')}
+                       ('identity_file', 'user_file', 'known_hosts_file', 'certificate_file', 'token_file')}
         (self.source / 'scripts/native.py').write_text('print("updated fixture")\n')
         with patch.object(self.service, 'registration', return_value={}), \
                 patch('installation.subprocess.run', return_value=subprocess.CompletedProcess([], 0)):
@@ -278,7 +281,7 @@ class NativeServiceTests(unittest.TestCase):
         manifest = json.loads(path.read_text())
         manifest['schema_version'] = 4
         manifest.pop('support_revision')
-        for name in ('scripts/decoder.py', 'scripts/decoder_route.py', 'build/decoder-route.dylib'):
+        for name in ('scripts/decoder.py', 'scripts/decoder_route.py', 'build/decoder-route.dylib', 'build/' + CLI_NAME):
             manifest['files'].pop(name)
             (self.service.package / name).unlink()
         write_state(path, manifest)
@@ -292,8 +295,8 @@ class NativeServiceTests(unittest.TestCase):
         self.assertTrue(self.service.needs_update())
         previous = load_config(self.service.package / 'config.json')
         credentials = {name: getattr(previous, name).read_bytes() for name in
-                       ('identity_file', 'user_file', 'known_hosts_file', 'certificate_file')}
-        self.install_plist(self.service.definition(previous))
+                       ('identity_file', 'user_file', 'known_hosts_file', 'certificate_file', 'token_file')}
+        self.install_plist(self.service.definition(previous, manifest=legacy))
         with patch.object(self.service, 'registration', return_value={}), \
              patch.object(self.service, 'stop', return_value={}) as stop, \
              patch.object(self.service, 'start', return_value={}), \
@@ -306,6 +309,134 @@ class NativeServiceTests(unittest.TestCase):
         for name, data in credentials.items():
             self.assertEqual(getattr(current, name).read_bytes(), data)
         self.assertTrue((self.service.package / 'build/decoder-route.dylib').is_file())
+
+    def assert_ssh_era_update_is_preserved(self, revision):
+        self.prepare()
+        path = self.service.package / 'manifest.json'
+        manifest = json.loads(path.read_text())
+        if revision is None:
+            manifest['schema_version'] = 4
+            manifest.pop('support_revision')
+        else:
+            manifest['support_revision'] = revision
+        for name in ('build/' + CLI_NAME, *BRIDGE_UPDATE_FILES, 'private/token'):
+            manifest['files'].pop(name)
+            (self.service.package / name).unlink()
+        profile = self.service.package / 'config.json'
+        saved = json.loads(profile.read_text())
+        saved['backend'].pop('service')
+        write_state(profile, saved)
+        manifest['files']['config.json'] = hashlib.sha256(profile.read_bytes()).hexdigest()
+        write_state(path, manifest)
+        configured = load_config(profile, root=self.source)
+        self.assertTrue(configured.token_file.is_file())  # Another profile's default must not be used.
+        self.service.validate_package()
+        self.install_plist(self.service.definition(configured, manifest=manifest))
+        before = {file: file.read_bytes() for file in self.service.package.rglob('*') if file.is_file()}
+        previous = self.service.plist.read_bytes()
+        with patch.object(self.service, 'stop') as stop, \
+                patch.object(self.service, 'prepare') as prepare, \
+                patch.object(self.service, 'install') as install, \
+                patch('installation.load_config', side_effect=lambda path: load_config(path, root=self.source)), \
+                patch('installation.subprocess.run', return_value=subprocess.CompletedProcess([], 0)):
+            with self.assertRaisesRegex(RuntimeError, 'SSH-era installation'):
+                self.service.update_saved()
+        stop.assert_not_called()
+        prepare.assert_not_called()
+        install.assert_not_called()
+        self.assertEqual(self.service.plist.read_bytes(), previous)
+        self.assertEqual({file: file.read_bytes() for file in self.service.package.rglob('*') if file.is_file()}, before)
+        self.assertEqual(list(self.service.base.glob('previous-*')), [])
+        with patch.object(self.service, 'registration', return_value={}), \
+                patch('sharingd.SharingdAgent.restore_detached') as restore, \
+                patch('installation.load_config', side_effect=lambda path: load_config(path, root=self.source)), \
+                patch('installation.subprocess.run', return_value=subprocess.CompletedProcess([], 0)):
+            with self.assertRaisesRegex(RuntimeError, 'SSH-era installation'):
+                self.service.prepare(replace_package=True)
+        restore.assert_not_called()
+        self.assertEqual({file: file.read_bytes() for file in self.service.package.rglob('*') if file.is_file()}, before)
+
+    def test_token_free_legacy_package_preserves_existing_support(self):
+        self.assert_ssh_era_update_is_preserved(None)
+
+    def test_token_free_revision27_package_preserves_existing_support(self):
+        self.assert_ssh_era_update_is_preserved(27)
+
+    def test_missing_replacement_credentials_preserve_package_and_sharingd(self):
+        self.prepare()
+        before = (self.service.package / 'manifest.json').read_bytes()
+        for attribute in ('token_file', 'certificate_file'):
+            for mode in ('missing', 'empty', 'whitespace'):
+                if attribute == 'certificate_file' and mode == 'whitespace':
+                    continue
+                with self.subTest(attribute=attribute, mode=mode):
+                    candidate = self.root / f'{attribute}-{mode}'
+                    if mode == 'empty':
+                        candidate.touch()
+                    elif mode == 'whitespace':
+                        candidate.write_text('  \n\t ')
+                    replacement = replace(self.config, **{attribute: candidate})
+                    with patch.object(self.service, 'registration', return_value={}), \
+                            patch('sharingd.SharingdAgent.restore_detached') as restore, \
+                            patch('installation.subprocess.run', return_value=subprocess.CompletedProcess([], 0)):
+                        with self.assertRaisesRegex(RuntimeError, attribute):
+                            self.service.prepare(replacement, replace_package=True)
+                    restore.assert_not_called()
+                    self.assertEqual((self.service.package / 'manifest.json').read_bytes(), before)
+                    self.assertEqual(list(self.service.base.glob('previous-*')), [])
+                    self.assertEqual(list(self.service.base.glob('.package-*')), [])
+
+    def test_imported_ssh_era_profile_cannot_borrow_default_token(self):
+        self.prepare()
+        before = (self.service.package / 'manifest.json').read_bytes()
+        profile = self.root / 'ssh-era-ready.json'
+        saved = json.loads((self.service.package / 'config.json').read_text())
+        saved['backend'].pop('service')
+        write_state(profile, saved)
+        imported = load_config(profile, root=self.source)
+        self.assertTrue(imported.token_file.is_file())
+        with patch.object(self.service, 'registration', return_value={}), \
+                patch('sharingd.SharingdAgent.restore_detached') as restore, \
+                patch('installation.subprocess.run', return_value=subprocess.CompletedProcess([], 0)):
+            with self.assertRaisesRegex(RuntimeError, 'SSH-era installation'):
+                self.service.prepare(imported, replace_package=True)
+        restore.assert_not_called()
+        self.assertEqual((self.service.package / 'manifest.json').read_bytes(), before)
+        self.assertEqual(list(self.service.base.glob('previous-*')), [])
+
+    def test_missing_saved_credentials_do_not_stop_or_replace_support(self):
+        self.prepare()
+        profile = self.service.package / 'config.json'
+        original = json.loads(profile.read_text())
+        path = self.service.package / 'manifest.json'
+        manifest = json.loads(path.read_text())
+        manifest['support_revision'] = SUPPORT_REVISION - 1
+        for attribute in ('token_file', 'certificate_file'):
+            for exists in (False, True):
+                with self.subTest(attribute=attribute, empty=exists):
+                    candidate = self.root / (attribute + ('-empty' if exists else '-missing'))
+                    if exists:
+                        candidate.touch()
+                    saved = json.loads(json.dumps(original))
+                    if attribute == 'token_file':
+                        saved['backend']['service']['token_file'] = str(candidate)
+                    else:
+                        saved['backend']['certificate_file'] = str(candidate)
+                    write_state(profile, saved)
+                    manifest['files']['config.json'] = hashlib.sha256(profile.read_bytes()).hexdigest()
+                    write_state(path, manifest)
+                    before = path.read_bytes()
+                    with patch.object(self.service, 'stop') as stop, \
+                            patch.object(self.service, 'prepare') as prepare, \
+                            patch.object(self.service, 'install') as install, \
+                            patch('installation.subprocess.run', return_value=subprocess.CompletedProcess([], 0)):
+                        with self.assertRaisesRegex(RuntimeError, attribute):
+                            self.service.update_saved()
+                    stop.assert_not_called()
+                    prepare.assert_not_called()
+                    install.assert_not_called()
+                    self.assertEqual(path.read_bytes(), before)
+                    self.assertEqual(list(self.service.base.glob('previous-*')), [])
 
     def test_incomplete_update_preserves_running_old_package(self):
         self.legacy_package()
@@ -330,7 +461,7 @@ class NativeServiceTests(unittest.TestCase):
         value = json.loads(manifest.read_text())
         value['support_revision'] = SUPPORT_REVISION - 1
         write_state(manifest, value)
-        self.install_plist(self.service.definition(self.config))
+        self.install_plist(self.service.definition(self.config, manifest=value))
         run = self.service.package / 'runtime/native-20261110-000056'
         backend = run / 'backend-000009'
         backend.mkdir(parents=True, mode=0o700)
@@ -411,7 +542,7 @@ class NativeServiceTests(unittest.TestCase):
         value = json.loads(manifest.read_text())
         value['support_revision'] = SUPPORT_REVISION - 1
         write_state(manifest, value)
-        self.install_plist(self.service.definition(self.config))
+        self.install_plist(self.service.definition(self.config, manifest=value))
         run = self.service.package / 'runtime/native-20261111-073111'
         run.mkdir(parents=True, mode=0o700)
         missing = run.parent / 'native-20261111-065931/backend-000001'
@@ -662,7 +793,7 @@ class NativeServiceTests(unittest.TestCase):
         write_state(path, manifest)
         previous = load_config(self.service.package / 'config.json')
         definition = self.service.definition(previous)
-        self.install_plist(definition)
+        self.install_plist(self.service.definition(previous, manifest=manifest))
         self.assertTrue(self.service.needs_update())
         with patch.object(self.service, 'registration', return_value={}), \
                 patch.object(self.service, 'stop', return_value={}) as stop, \
@@ -693,7 +824,8 @@ class NativeServiceTests(unittest.TestCase):
         birth = [42, os.getuid(), 100, 1]
         write_state(self.service.state, {'supervisor_birth': birth})
         with patch.object(self.service, 'registration', return_value={}), \
-             patch('installation.process_birth', return_value=tuple(birth)):
+             patch('installation.process_birth', return_value=tuple(birth)), \
+             patch('installation.subprocess.run', return_value=subprocess.CompletedProcess([], 0)):
             with self.assertRaisesRegex(RuntimeError, 'Wait for native support cleanup'):
                 self.service.prepare(replace_package=True)
 
@@ -724,9 +856,26 @@ class NativeServiceTests(unittest.TestCase):
         wait.assert_called_once()
         self.assertTrue(value['last_cleanup_verified'])
 
-    def test_transport_migration_refuses_a_registered_job(self):
+    def stage_cli_replacement(self, *, legacy_usb=False):
         self.prepare()
-        previous = self.install_plist(self.service.definition(replace(self.config, transport='ssh')))
+        manifest_path = self.service.package / 'manifest.json'
+        old = json.loads(manifest_path.read_text())
+        old['support_revision'] = 39
+        old['files'].pop('build/' + CLI_NAME)
+        (self.service.package / 'build' / CLI_NAME).unlink()
+        write_state(manifest_path, old)
+        definition = self.service.definition(self.config, manifest=old)
+        if legacy_usb:
+            definition['ProgramArguments'].append('--manage-usb')
+        previous = self.install_plist(definition)
+        with patch.object(self.service, 'registration', return_value={}), \
+                patch('installation.subprocess.run', return_value=subprocess.CompletedProcess([], 0)):
+            self.service.prepare(replace_package=True)
+        self.assertEqual(self.service.plist.read_bytes(), previous)
+        return previous
+
+    def test_cli_migration_refuses_a_registered_job(self):
+        previous = self.stage_cli_replacement()
         with patch.object(self.service, 'registration', return_value={'state': 'running'}), \
                 patch.object(self.service, 'start') as start:
             with self.assertRaisesRegex(RuntimeError, 'Stop the service'):
@@ -735,9 +884,8 @@ class NativeServiceTests(unittest.TestCase):
         self.assertEqual(self.service.plist.read_bytes(), previous)
         self.assertFalse(list(self.service.base.glob('service.previous.*.plist')))
 
-    def test_transport_migration_waits_for_an_unregistered_live_supervisor(self):
-        self.prepare()
-        previous = self.install_plist(self.service.definition(replace(self.config, transport='ssh')))
+    def test_cli_migration_waits_for_an_unregistered_live_supervisor(self):
+        previous = self.stage_cli_replacement()
         birth = [42, os.getuid(), 100, 3]
         write_state(self.service.state, {'supervisor_birth': birth})
         with patch.object(self.service, 'registration', return_value={}), \
@@ -760,9 +908,8 @@ class NativeServiceTests(unittest.TestCase):
             start.assert_not_called()
         self.assertEqual(self.service.plist.read_bytes(), previous)
 
-    def test_interrupted_transport_install_preserves_original_and_can_retry(self):
-        self.prepare()
-        previous = self.install_plist(self.service.definition(replace(self.config, transport='ssh')))
+    def test_interrupted_cli_install_preserves_original_and_can_retry(self):
+        previous = self.stage_cli_replacement(legacy_usb=True)
         with patch.object(self.service, 'registration', return_value={}), \
                 patch.object(self.service, 'start', return_value={}) as start:
             with patch('installation.os.replace', side_effect=OSError('simulated disk failure')):
@@ -778,15 +925,42 @@ class NativeServiceTests(unittest.TestCase):
             start.assert_called_once()
         self.assertEqual(plistlib.loads(self.service.plist.read_bytes()), self.service.definition(self.config))
 
-    def test_transport_install_rechecks_registration_before_replacement(self):
-        self.prepare()
-        previous = self.install_plist(self.service.definition(replace(self.config, transport='ssh')))
+    def test_cli_install_rechecks_registration_before_replacement(self):
+        previous = self.stage_cli_replacement()
         with patch.object(self.service, 'registration', side_effect=[{}, {'state': 'running'}]), \
                 patch.object(self.service, 'start') as start:
             with self.assertRaisesRegex(RuntimeError, 'changed during installation'):
                 self.service.install()
             start.assert_not_called()
         self.assertEqual(self.service.plist.read_bytes(), previous)
+
+    def test_start_recovers_when_only_the_old_definition_remains(self):
+        self.stage_cli_replacement()
+        bootstrap = subprocess.CompletedProcess([], 0)
+        with patch.object(self.service, 'registration', return_value={}), \
+                patch.object(self.service, 'command', return_value=bootstrap) as command:
+            self.service.start()
+        command.assert_called_once_with('bootstrap', self.service.domain, str(self.service.plist))
+        self.assertEqual(plistlib.loads(self.service.plist.read_bytes()), self.service.definition(self.config))
+
+    def test_update_from_app_registered_support_returns_to_the_cli(self):
+        self.prepare()
+        app = self.root / 'Mirra.app'
+        manifest_path = self.service.package / 'manifest.json'
+        old = json.loads(manifest_path.read_text())
+        old.update(support_revision=41, managed_app=str(app))
+        write_state(manifest_path, old)
+        saved_config = load_config(self.service.package / 'config.json')
+        with patch.object(self.service, 'registration', return_value={}), \
+                patch.object(self.service, 'background_action', return_value='not_registered') as manage, \
+                patch.object(self.service, 'command', return_value=subprocess.CompletedProcess([], 0)) as launch, \
+                patch('installation.subprocess.run', return_value=subprocess.CompletedProcess([], 0)):
+            self.service.update_saved()
+        manage.assert_called_once_with('unregister')
+        launch.assert_called_once_with('bootstrap', self.service.domain, str(self.service.plist))
+        self.assertIsNone(self.service.managed_app())
+        self.assertEqual(load_config(self.service.package / 'config.json'), saved_config)
+        self.assertEqual(plistlib.loads(self.service.plist.read_bytes()), self.service.definition(self.config))
 
     def test_first_install_does_not_clobber_a_concurrently_created_plist(self):
         self.prepare()

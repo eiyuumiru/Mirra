@@ -1,7 +1,9 @@
 # Command-line bridge setup
 
-For guided setup, open Mirra and choose **Settings → Set up Mirra**. The steps
-below provide the source checkout's CLI alternative. The bridge needs **iOS 15
+For guided setup, open Mirra and choose **Setup → Set Up a New iPhone**. If the
+phone already has Mirra Bridge, choose **Connect to an Existing iPhone** and
+use the token shown in the phone’s **Settings → Mirra Bridge**. The steps
+below provide the source checkout's CLI alternative for a new bridge. It needs **iOS 15
 or later**, an active jailbreak, OpenSSH and `ldid`; see [Bridge compatibility](Bridges.md).
 
 ## Create a profile

@@ -21,14 +21,14 @@ from sockets import BindHelper
 from launcher import NativeLaunchAgent
 from processes import NativeAppObserver,process_birth
 from supervisor import NativeBackend
-from forwarder import USBForwarder
 from state import write_state
 from lifetime import add_lifetime_arguments,duration_from_arguments,deadline_for,emit_event
 from logs import BoundedLogs,open_append
 from retention import track,retire,prune
 from compatibility import require_media_profile, supported_apple_app
 from decoder import DecoderRoute
-from startup import StartupError, mirroring_running, require_container, run_service, wait_for_mirroring_exit
+from startup import (StartupError, mirroring_running, quit_mirroring, relaunch_mirroring, require_container,
+                     run_service, wait_for_mirroring_exit)
 
 
 def main():
@@ -40,7 +40,7 @@ def main():
     parser.add_argument('--recover-backend',action='store_true',
                         help='Keep native launch support running and retry a failed backend (requires --launch-services)')
     parser.add_argument('--manage-usb',action='store_true',
-                        help='Own the configured USB forwarding port; no separate proxy Terminal is required')
+                        help='Accepted for SSH-era service definitions; USB now reaches the bridge service through usbmux')
     parser.add_argument('--service-log',help=argparse.SUPPRESS)
     parser.add_argument('--service-state',help=argparse.SUPPRESS)
     args=parser.parse_args()
@@ -56,21 +56,19 @@ def run_session(parser,args,requested_stop):
     if args.recover_backend and not args.launch_services:
         parser.error('--recover-backend requires --launch-services')
     config=load_config(args.config)
-    if args.manage_usb and config.transport != 'usb':
-        parser.error('--manage-usb requires backend.transport=usb')
     duration=duration_from_arguments(parser,args,config.seconds)
     if config.system_app!=Path('/System/Applications/iPhone Mirroring.app'):
         parser.error('The native path currently targets the installed system app')
     managed_startup=bool(args.launch_services and args.service_state)
+    started=time.monotonic()
+    reopen_app=[False]
     if args.launch_services:
         try:recovered=NativeLaunchAgent.recover_abandoned()
         except (OSError,RuntimeError,ValueError) as error:parser.error(str(error))
         if recovered:print(json.dumps({'ABANDONED_NATIVE_SESSION_RECOVERED':recovered}),flush=True)
-    # Existing recovery closes apps owned by an abandoned session first. A
-    # normal app opened before support instead waits without latching failure.
-    if managed_startup:
-        if not wait_for_mirroring_exit(requested_stop,args.service_state):return 0
-    elif mirroring_running():
+        if managed_startup:
+            emit_event({'NATIVE_STARTUP_STAGE':'recovered_launch_agent','elapsed_seconds':round(time.monotonic()-started,2)})
+    if not managed_startup and mirroring_running():
         parser.error('Close the existing Mirroring app before starting a native session')
     info=plistlib.loads((config.system_app/'Contents/Info.plist').read_bytes())
     if not supported_apple_app(info):
@@ -83,6 +81,17 @@ def run_session(parser,args,requested_stop):
         parser.error('Build the native LaunchServices adapter first: make build/launch.dylib')
     try:media_profile=require_media_profile()
     except (OSError,RuntimeError,subprocess.SubprocessError) as error:parser.error(str(error))
+    # Finish read-only checks while macOS is restoring apps. Only the native
+    # session changes wait for an existing system Mirroring app to quit.
+    if managed_startup:
+        emit_event({'NATIVE_STARTUP_STAGE':'verified_host','elapsed_seconds':round(time.monotonic()-started,2)})
+        def quit_existing_app():
+            # The open copy predates the launch hooks: quit it now and reopen it
+            # once the bridge is ready, instead of waiting for the user.
+            if quit_mirroring():
+                reopen_app[0]=True
+                emit_event({'NATIVE_MIRRORING_QUIT':True,'relaunch_after_ready':True})
+        if not wait_for_mirroring_exit(requested_stop,args.service_state,quit_existing_app):return 0
     container=Path.home()/'Library/Containers/com.apple.ScreenContinuity/Data/tmp'
     require_container(container)
     if requested_stop.is_set():return 0
@@ -113,7 +122,7 @@ def run_session(parser,args,requested_stop):
     listener=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
     helper=BindHelper(executable,allow_awdl=True)
     app_observer=NativeAppObserver(executable,staged_adapters[0])
-    backend=app=None;launch_agent=None;usb_proxy=None;decoder=None
+    backend=app=None;launch_agent=None;decoder=None
     log_limits=BoundedLogs(on_error=stop.set)
     before=hashlib.sha256(executable.read_bytes()).hexdigest()
     record={'run':run_directory.name,'supervisor_pid':os.getpid(),'system_app':str(config.system_app),'executable_sha256_before':before,
@@ -122,7 +131,6 @@ def run_session(parser,args,requested_stop):
             'automatic_backend_recovery':args.recover_backend,
             'launch_agent_attempted':False,
             'media_profile':media_profile['profile'],
-            'managed_usb_forwarding':args.manage_usb,
             'launch_method':'ordinary LaunchServices with background support' if args.launch_services else 'custom launch command',
             'validation_scope':'Lifecycle only; video and input require a separate observation',
             'adapter_sha256':{p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in staged_adapters}}
@@ -165,9 +173,6 @@ def run_session(parser,args,requested_stop):
         if args.service_log:
             for fd in (1,2):
                 log_limits.watch_native(Path(args.service_log),os.getpid(),fd)
-        if args.manage_usb:
-            usb_proxy=USBForwarder(config).start()
-            emit_event({'NATIVE_USB_FORWARDING_READY':True,'port':config.listen_port})
         listener.bind(str(address));actual.chmod(0o600);listener.listen(8);listener.settimeout(.2)
         threading.Thread(target=bindings,daemon=True).start()
         with open_append(run_directory/'app.log',binary=True) as app_log:
@@ -219,6 +224,12 @@ def run_session(parser,args,requested_stop):
                             record['observed_app_pids'].append(pid)
                             print(json.dumps({'NATIVE_NORMAL_LAUNCH_OBSERVED':pid}),flush=True)
                 state=backend.snapshot()
+                if reopen_app[0] and state['ready'] and args.launch_services:
+                    reopen_app[0]=False
+                    try:reopened=relaunch_mirroring()
+                    except (OSError,subprocess.SubprocessError):reopened=False
+                    record['mirroring_relaunched']=reopened
+                    emit_event({'NATIVE_MIRRORING_RELAUNCHED':reopened})
                 if state['phase'] in ('failed','stopped'):
                     record['backend_ended_before_stop']=True
                     break
@@ -241,8 +252,6 @@ def run_session(parser,args,requested_stop):
                 record['decoder_restore_error']=str(error)
         if backend is not None:
             record['backend_cleanup']=backend.close()
-        if usb_proxy is not None:
-            record['usb_proxy_cleanup']=usb_proxy.close()
         record['log_limits']=log_limits.close()
         listener.close()
         actual.unlink(missing_ok=True);link.unlink();private.rmdir();short.rmdir()

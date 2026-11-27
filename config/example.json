@@ -14,6 +14,7 @@
       "remote_certificate": "/var/mobile/Library/Caches/Mirra/bridge/certificate.der",
       "timeout_seconds": 12
     },
+    "service": {"port": 47820, "token_file": "private/bridge/token"},
     "certificate_file": "private/bridge/certificate.der"
   },
   "host": {

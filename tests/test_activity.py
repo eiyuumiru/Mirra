@@ -6,13 +6,12 @@ import subprocess
 import sys
 import tempfile
 import threading
-from types import SimpleNamespace
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from activity import capture, FileLog, run, poll_errors
+from activity import capture, emit, FileLog, run, poll_errors
 from redaction import redact_line, redact_text
-from transport import Endpoint
+from bridgefixture import BridgeFixture
 from logfiles import migrate_legacy
 
 
@@ -101,33 +100,21 @@ print('{"certificate_exported":true,"bytes":1234}')
         self.assertTrue(any('unsupported_device: aks_ref_key_create is missing' in r['message'] for r in records))
         self.assertEqual(records[-1]['fields']['exit_code'], 17)
 
-    def test_endpoint_logging_retains_real_replies_and_captures_ssh_stderr(self):
-        command = self.script('''import json,sys
-print('{"ready":true}',flush=True)
-print('actual endpoint stderr: helper initialized',file=sys.stderr,flush=True)
-for line in sys.stdin:
- request=json.loads(line)
- print(json.dumps({'status':0,'data':'fixture-short-key','identity':'fixture-identity'}),flush=True)
- if request['operation']=='exit': break
-''')
+    def test_endpoint_logging_records_socket_replies_without_key_material(self):
         records = []
-        stderr_seen = threading.Event()
-
-        def sink(value):
-            records.append(value)
-            if 'actual endpoint stderr: helper initialized' in value['message']:
-                stderr_seen.set()
-
-        with capture(sink), Endpoint(SimpleNamespace(timeout=2), command=command) as endpoint:
-            self.assertTrue(stderr_seen.wait(2), 'endpoint stderr did not reach the live logger')
-            reply = endpoint.call('generate', local_ltk='fixture-request-key')
-            self.assertEqual(reply['data'], 'fixture-short-key')
-            self.assertEqual(reply['identity'], 'fixture-identity')
+        def reply(request, peer):
+            return {'status': 0, 'data': 'fixture-short-key', 'identity': 'fixture-identity'}
+        with capture(records.append), BridgeFixture(reply) as bridge:
+            endpoint = bridge.connect()
+            response = endpoint.call('generate', local_ltk='fixture-request-key')
+            self.assertEqual(response['data'], 'fixture-short-key')
+            self.assertEqual(response['identity'], 'fixture-identity')
         text = json.dumps(records)
         self.assertNotIn('fixture-short-key', text)
         self.assertNotIn('fixture-request-key', text)
         self.assertNotIn('fixture-identity', text)
-        self.assertIn('actual endpoint stderr: helper initialized', text)
+        self.assertTrue(any(r['message'] == 'reply' and r['fields']['reply'].get('status') == 0 for r in records))
+        self.assertTrue(any(r['message'] == 'request' and r['fields']['operation'] == 'generate' for r in records))
 
     def test_timeout_reaps_only_the_logger_owned_child(self):
         command = self.script('import time\ntime.sleep(20)\n')
@@ -168,13 +155,10 @@ for line in sys.stdin:
         self.assertEqual(folder.stat().st_mode & 0o777, 0o700)
         self.assertEqual(log.path.stat().st_mode & 0o777, 0o600)
 
-    def test_ui_event_helper_saves_real_message_with_credentials_redacted(self):
+    def test_activity_saves_real_message_with_credentials_redacted(self):
         folder = self.root / 'Mirra/logs'
-        script = Path(__file__).resolve().parents[1] / 'scripts/event.py'
-        result = subprocess.run([sys.executable, '-B', str(script), '--base', str(folder)],
-            input=json.dumps({'source':'Mirra','level':'error','message':'real failure 42 token=fixture-token',
-                              'password':'fixture-password'}).encode(), capture_output=True, timeout=3)
-        self.assertEqual(result.returncode, 0, result.stderr)
+        with capture(FileLog(folder, name='app.log')):
+            emit('Mirra', 'real failure 42 token=fixture-token', 'error', password='fixture-password')
         saved = json.loads((folder / ('app-' + date.today().isoformat() + '.log')).read_text())
         self.assertIn('real failure 42', saved['message'])
         self.assertIn('timestamp', saved)
@@ -234,16 +218,14 @@ for line in sys.stdin:
         self.assertEqual(log.maintain(), ['native-2026-11-02.log'])
         self.assertFalse(path.exists())
 
-    def test_app_event_startup_performs_expiration_without_touching_other_files(self):
+    def test_first_activity_performs_expiration_without_touching_other_files(self):
         folder=self.root/'logs';folder.mkdir(mode=0o700)
         old=folder/('native-' + (date.today()-timedelta(days=8)).isoformat() + '.log')
         old.write_text('expiration fixture');old.chmod(0o600)
         legacy=folder/'setup.log';legacy.write_text('earlier SSH output\n');legacy.chmod(0o600)
         other=folder/'keep.txt';other.write_text('owner file')
-        script=Path(__file__).resolve().parents[1]/'scripts/event.py'
-        result=subprocess.run([sys.executable,'-B',str(script),'--base',str(folder)],
-            input=b'{"source":"Mirra","message":"capture started"}',capture_output=True,timeout=3)
-        self.assertEqual(result.returncode,0,result.stderr)
+        with capture(FileLog(folder, name='app.log')):
+            emit('Mirra', 'capture started')
         self.assertFalse(old.exists())
         self.assertEqual(other.read_text(),'owner file')
         self.assertTrue((folder/('app-' + date.today().isoformat() + '.log')).is_file())

@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/bridge", "crates/keystore", "crates/native", "crates/service", "crates/cli"]
+
+[workspace.package]
+edition = "2021"
+version = "0.2.0"
+publish = false
+
+[workspace.dependencies]
+serde_json = { version = "1", features = ["preserve_order"] }
+libc = "0.2"
+regex = "1"
+openssl = { version = "0.10", features = ["vendored"] }
+sha2 = "0.10"
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+tempfile = "3"
+mirra-core = { path = "crates/core" }
+mirra-bridge = { path = "crates/bridge" }
+mirra-keystore = { path = "crates/keystore" }
+mirra-native = { path = "crates/native" }
+mirra-service = { path = "crates/service" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+# Unwind (as in tests): the service turns a panic in its session or backend
+# supervisor into a recorded failure and still runs its restoration cleanup.
+panic = "unwind"

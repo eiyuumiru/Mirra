@@ -15,6 +15,15 @@ from distribution import ARCHIVE_ROOT, FILE_LIST, export_source, source_payload
 
 
 class RepositorySourceExportTests(unittest.TestCase):
+    def test_export_contains_every_rust_module_and_manifest(self):
+        repository = Path(__file__).resolve().parents[1]
+        _, manifest = source_payload(repository)
+        expected = {str(path.relative_to(repository))
+                    for pattern in ('crates/**/*.rs', 'crates/**/Cargo.toml')
+                    for path in (repository / 'rust').glob(pattern)}
+        expected.update(('rust/Cargo.toml', 'rust/Cargo.lock'))
+        self.assertFalse(expected - manifest['files'].keys())
+
     def test_export_includes_wire_boundary_regressions(self):
         data, _ = source_payload(Path(__file__).resolve().parents[1])
         with zipfile.ZipFile(io.BytesIO(data)) as archive:

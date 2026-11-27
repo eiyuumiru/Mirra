@@ -36,6 +36,7 @@ static void *fixture_symbol(void *handle, const char *name) {
 #define TARGET_OS_IPHONE 1
 #define dlopen fixture_open
 #define dlsym fixture_symbol
+#define MIRRA_NO_PREFERENCES 1
 #define main mirra_endpoint_main
 #import "../src/phone/endpoint.m"
 #undef main

@@ -150,10 +150,12 @@ static void test_cache_tables(void) {
         api_cache = &original; api_symbols = table; api_fallback_calls = 0;
         KeyStore keys = {0};
         CHECK(load_keystore(&keys, NULL, dlsym, cache_api_fallback).count == 0);
-        CHECK(api_fallback_calls == 18 && keys.create_bag && keys.params_create && keys.remote_session);
+        CHECK(api_fallback_calls == 21 && keys.create_bag && keys.params_create && keys.remote_session);
+        CHECK(!keys.save_bag && !keys.load_bag && !keys.unlock_bag);
         api_fallback_calls = 0;
         CHECK(load_keystore(&keys, (void *)1, cache_api_export, cache_api_fallback).count == 0);
-        CHECK(api_fallback_calls == 17 && (void *)keys.create_bag == (void *)0x44444000);
+        CHECK(api_fallback_calls == 20 && (void *)keys.create_bag == (void *)0x44444000);
+        CHECK(!keys.save_bag && !keys.load_bag && !keys.unlock_bag);
         CacheSymbol value;
         CHECK(cache_find_symbol(&table, original.offsets[0], "aks_create_bag_extra", &value) == CACHE_SYMBOL_MISSING);
         CHECK(cache_find_symbol(&table, original.offsets[0] + 4, "aks_create_bag", &value) == CACHE_SYMBOL_MISSING);

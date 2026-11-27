@@ -1,13 +1,13 @@
 from pathlib import Path
 import json
 import sys
-import time
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from keystore import AksBroker, MAX_SESSIONS, NO_MEMORY, SESSION_BASE, SESSION_END, UNAVAIWORKSPACELE, verify_attested_key
-from transport import Endpoint, EndpointError, transport_details
+from transport import EndpointError, transport_details
+from bridgefixture import BridgeFixture
 from test_provisioning import fixture_ltk
 
 
@@ -15,7 +15,7 @@ class BrokerSessionTests(unittest.TestCase):
     def broker(self):
         endpoint = Mock(timeout=1)
         endpoint.failure = None
-        endpoint.process.poll.return_value = None
+        endpoint.poll.return_value = None
         broker = AksBroker(endpoint)
         broker.identities['owned-local'] = 'private-identity'
         return broker, endpoint
@@ -126,7 +126,7 @@ class BrokerSessionTests(unittest.TestCase):
             {'operation': 'validate', 'reply_bytes': 9, 'identity': 'private-identity',
              'data': 'private-key', 'stderr': 'private-stderr'})
         first = broker.execute({'operation': 'health'})
-        endpoint.process.poll.return_value = 255
+        endpoint.poll.return_value = 0
         second = broker.execute({'operation': 'health'})
         self.assertEqual(first, second)
         self.assertEqual(first['transport_failure'],
@@ -153,9 +153,10 @@ class BrokerSessionTests(unittest.TestCase):
     def test_reset_transport_details_remain_available_during_recovery(self):
         broker, endpoint = self.broker()
         broker.sessions = {SESSION_BASE + 1: 97}
-        endpoint.call.side_effect = EndpointError('Closed stream', 'endpoint_eof', {'exit_code': 255})
+        endpoint.call.side_effect = EndpointError('Closed stream', 'endpoint_eof',
+                                                 {'operation': 'reset', 'data': 'private-input'})
         result = broker.reset_owned_sessions()
-        self.assertEqual(result['transport_failure'], {'code': 'endpoint_eof', 'exit_code': 255})
+        self.assertEqual(result['transport_failure'], {'code': 'endpoint_eof', 'operation': 'reset'})
         self.assertEqual(broker.execute({'operation': 'health'})['transport_failure'], result['transport_failure'])
         self.assertEqual(broker.sessions, {SESSION_BASE + 1: 97})
 
@@ -194,26 +195,34 @@ class BrokerSessionTests(unittest.TestCase):
         self.assertFalse(broker.execute({'operation': 'health'})['ready'])
         self.assertEqual(self.session(broker)['error'], 'broker_requires_restart')
 
-    def test_many_slow_resets_share_one_real_transport_deadline(self):
-        program = '''import json,sys,time
-print('{"ready":true}',flush=True)
-for line in sys.stdin:
- r=json.loads(line)
- assert '_deadline' not in r
- time.sleep(.08)
- print('{"status":0}',flush=True)
-'''
-        with Endpoint(command=[sys.executable, '-u', '-c', program], timeout=.14) as endpoint:
+    def test_owned_resets_share_one_transport_deadline(self):
+        def reply_once(request, _peer):
+            if request['session'] == 1:
+                return {'status': 0}
+
+        with BridgeFixture(reply_once, timeout=2) as bridge:
+            endpoint = bridge.connect()
             broker = AksBroker(endpoint)
             broker.sessions = {SESSION_BASE + i: i for i in range(1, 17)}
-            start = time.monotonic()
-            result = broker.reset_owned_sessions()
-            self.assertLess(time.monotonic() - start, .6)
+            # Inspect the deadlines used by the real WebSocket reads directly.
+            with patch.object(endpoint.socket, 'receive', wraps=endpoint.socket.receive) as receive:
+                result = broker.reset_owned_sessions()
+            self.assertEqual(receive.call_count, 2)
+            self.assertEqual(receive.call_args_list[0], receive.call_args_list[1])
             self.assertEqual(result['status'], UNAVAIWORKSPACELE)
             self.assertEqual(result['reset_count'], 1)
             self.assertEqual(result['remaining_sessions'], 15)
-            with self.assertRaises(EndpointError):
+            self.assertEqual(result['transport_failure']['code'], 'endpoint_reply_timeout')
+            self.assertNotIn(SESSION_BASE + 1, broker.sessions)
+            self.assertIn(SESSION_BASE + 2, broker.sessions)
+            with self.assertRaises(EndpointError) as caught:
                 endpoint.call('validate')
+            self.assertEqual(caught.exception.code, 'endpoint_unavailable')
+
+        self.assertEqual(bridge.requests, [
+            {'operation': 'reset', 'session': 1, 'data': ''},
+            {'operation': 'reset', 'session': 2, 'data': ''},
+        ])
 
 
 class AttestedKeyTests(unittest.TestCase):

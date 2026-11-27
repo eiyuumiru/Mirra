@@ -5,27 +5,32 @@
     "Foundation": {
       "install_name": "/System/Library/Frameworks/Foundation.framework/Foundation",
       "framework": true,
-      "symbols": ["_NSDefaultRunLoopMode", "_OBJC_CLASS_$_NSConstantDictionary", "_OBJC_CLASS_$_NSConstantIntegerNumber", "_OBJC_CLASS_$_NSData", "_OBJC_CLASS_$_NSDate", "_OBJC_CLASS_$_NSDictionary", "_OBJC_CLASS_$_NSJSONSerialization", "_OBJC_CLASS_$_NSMutableArray", "_OBJC_CLASS_$_NSMutableDictionary", "_OBJC_CLASS_$_NSMutableSet", "_OBJC_CLASS_$_NSNumber", "_OBJC_CLASS_$_NSRunLoop", "_OBJC_CLASS_$_NSString", "_OBJC_CLASS_$_NSUUID"]
+      "symbols": ["_NSClassFromString", "_NSDefaultRunLoopMode", "_OBJC_CLASS_$_NSArray", "_OBJC_CLASS_$_NSCharacterSet", "_OBJC_CLASS_$_NSConstantArray", "_OBJC_CLASS_$_NSConstantDictionary", "_OBJC_CLASS_$_NSConstantIntegerNumber", "_OBJC_CLASS_$_NSData", "_OBJC_CLASS_$_NSDate", "_OBJC_CLASS_$_NSDictionary", "_OBJC_CLASS_$_NSFileManager", "_OBJC_CLASS_$_NSJSONSerialization", "_OBJC_CLASS_$_NSMutableArray", "_OBJC_CLASS_$_NSMutableData", "_OBJC_CLASS_$_NSMutableDictionary", "_OBJC_CLASS_$_NSMutableSet", "_OBJC_CLASS_$_NSMutableString", "_OBJC_CLASS_$_NSNumber", "_OBJC_CLASS_$_NSPropertyListSerialization", "_OBJC_CLASS_$_NSRunLoop", "_OBJC_CLASS_$_NSSortDescriptor", "_OBJC_CLASS_$_NSString", "_OBJC_CLASS_$_NSThread", "_OBJC_CLASS_$_NSUUID"]
     },
     "CoreFoundation": {
       "install_name": "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation",
       "framework": true,
-      "symbols": ["___CFConstantStringClassReference", "___kCFBooleanFalse", "___kCFBooleanTrue"]
+      "symbols": ["_CFNotificationCenterAddObserver", "_CFNotificationCenterGetDarwinNotifyCenter", "_CFNotificationCenterPostNotification", "_CFPreferencesCopyValue", "_CFPreferencesSetValue", "_CFPreferencesSynchronize", "_CFRunLoopGetMain", "_CFRunLoopRun", "_CFRunLoopStop", "___CFConstantStringClassReference", "___kCFBooleanFalse", "___kCFBooleanTrue", "_kCFPreferencesAnyHost", "_kCFPreferencesCurrentUser"]
     },
     "Security": {
       "install_name": "/System/Library/Frameworks/Security.framework/Security",
       "framework": true,
-      "symbols": ["_SecRandomCopyBytes", "_kSecRandomDefault"]
+      "symbols": ["_SecRandomCopyBytes", "_kSecRandomDefault", "_sec_protocol_options_add_pre_shared_key", "_sec_protocol_options_append_tls_ciphersuite", "_sec_protocol_options_set_max_tls_protocol_version", "_sec_protocol_options_set_min_tls_protocol_version", "_sec_protocol_options_set_tls_pre_shared_key_identity_hint"]
+    },
+    "Network": {
+      "framework": true,
+      "install_name": "/System/Library/Frameworks/Network.framework/Network",
+      "symbols": ["__nw_content_context_default_message", "__nw_content_context_final_send", "_nw_connection_cancel", "_nw_connection_receive", "_nw_connection_send", "_nw_connection_set_queue", "_nw_connection_set_state_changed_handler", "_nw_connection_start", "_nw_error_get_error_code", "_nw_listener_cancel", "_nw_listener_create_with_port", "_nw_listener_get_port", "_nw_listener_set_new_connection_handler", "_nw_listener_set_queue", "_nw_listener_set_state_changed_handler", "_nw_listener_start", "_nw_parameters_create_secure_tcp", "_nw_parameters_set_reuse_local_address", "_nw_tcp_options_set_enable_keepalive", "_nw_tcp_options_set_keepalive_count", "_nw_tcp_options_set_keepalive_idle_time", "_nw_tcp_options_set_keepalive_interval", "_nw_tls_copy_sec_protocol_options"]
     },
     "objc": {
       "install_name": "/usr/lib/libobjc.A.dylib",
       "framework": false,
-      "symbols": ["___objc_personality_v0", "_objc_alloc", "_objc_autoreleasePoolPop", "_objc_autoreleasePoolPush", "_objc_autoreleaseReturnValue", "_objc_enumerationMutation", "_objc_msgSend", "_objc_opt_class", "_objc_opt_isKindOfClass", "_objc_release", "_objc_retain", "_objc_retainAutorelease", "_objc_retainAutoreleaseReturnValue", "_objc_retainAutoreleasedReturnValue", "_objc_storeStrong"]
+      "symbols": ["___objc_personality_v0", "_class_addMethod", "_class_getInstanceVariable", "_imp_implementationWithBlock", "_ivar_getOffset", "_objc_alloc", "_objc_allocateClassPair", "_objc_autoreleasePoolPop", "_objc_autoreleasePoolPush", "_objc_autoreleaseReturnValue", "_objc_copyWeak", "_objc_destroyWeak", "_objc_enumerationMutation", "_objc_initWeak", "_objc_loadWeakRetained", "_objc_msgSend", "_objc_msgSendSuper", "_objc_opt_class", "_objc_opt_isKindOfClass", "_objc_opt_new", "_objc_opt_respondsToSelector", "_objc_registerClassPair", "_objc_release", "_objc_retain", "_objc_retainAutorelease", "_objc_retainAutoreleaseReturnValue", "_objc_retainAutoreleasedReturnValue", "_objc_retainBlock", "_objc_storeStrong", "_objc_storeWeak", "_object_getClass", "_object_getIvar", "_object_setIvar"]
     },
     "System": {
       "install_name": "/usr/lib/libSystem.B.dylib",
       "framework": false,
-      "symbols": ["_CC_SHA256", "__Block_object_assign", "__Block_object_dispose", "__NSConcreteStackBlock", "__Unwind_Resume", "___memcpy_chk", "___snprintf_chk", "___stack_chk_fail", "___stack_chk_guard", "___stdinp", "___stdoutp", "__dyld_get_image_header", "__dyld_get_image_name", "__dyld_get_image_vmaddr_slide", "__dyld_image_count", "_close", "_dispatch_semaphore_create", "_dispatch_semaphore_signal", "_dispatch_semaphore_wait", "_dlopen", "_dlsym", "_fflush", "_free", "_fstat", "_fwrite", "_getline", "_getpagesize", "_getuid", "_lstat", "_malloc", "_memcmp", "_memcpy", "_memset", "_mmap", "_munmap", "_open", "_pread", "_putchar", "_strcmp", "_strncmp", "_sysctlbyname", "_unlink", "_write"]
+      "symbols": ["_CC_SHA1", "_CC_SHA256", "__Block_object_assign", "__Block_object_dispose", "__NSConcreteGlobalBlock", "__NSConcreteStackBlock", "__Unwind_Resume", "___error", "___memcpy_chk", "___snprintf_chk", "___stack_chk_fail", "___stack_chk_guard", "___stdinp", "___stdoutp", "__dispatch_main_q", "__dispatch_source_type_signal", "__dispatch_source_type_timer", "__dyld_get_image_header", "__dyld_get_image_name", "__dyld_get_image_vmaddr_slide", "__dyld_image_count", "_close", "_dispatch_after", "_dispatch_async", "_dispatch_data_apply", "_dispatch_data_create", "_dispatch_queue_create", "_dispatch_resume", "_dispatch_semaphore_create", "_dispatch_semaphore_signal", "_dispatch_semaphore_wait", "_dispatch_source_cancel", "_dispatch_source_create", "_dispatch_source_set_event_handler", "_dispatch_source_set_timer", "_dispatch_sync", "_dispatch_time", "_dlopen", "_dlsym", "_fflush", "_free", "_freeifaddrs", "_fstat", "_fsync", "_fwrite", "_getifaddrs", "_getline", "_getpagesize", "_getuid", "_inet_ntop", "_localtime_r", "_lstat", "_malloc", "_memcmp", "_memcpy", "_memset", "_mkdir", "_mmap", "_munmap", "_open", "_pread", "_putchar", "_rename", "_signal", "_strchr", "_strcmp", "_strftime", "_strncmp", "_strtol", "_sysctlbyname", "_time", "_unlink", "_write"]
     }
   }
 }

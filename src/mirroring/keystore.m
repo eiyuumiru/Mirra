@@ -1,9 +1,14 @@
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
+#import <Security/Security.h>
 #include <arpa/inet.h>
 #include <dispatch/dispatch.h>
 #include <dlfcn.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <mach-o/dyld.h>
+#include <sys/stat.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/socket.h>
@@ -43,6 +48,17 @@ static NSString *broker_path;
 static NSString *broker_token;
 static unsigned short broker_port;
 static NSString *dcrt_path;
+// Mirra keeps this sharingd (and the adapter) when it stops, so iPhone Mirroring
+// pairing stays armed; the next start only publishes its new broker here. The
+// file is opened while the adapter loads, before sharingd's sandbox starts.
+static int broker_file_fd = -1;
+static NSLock *broker_lock;
+static NSString *broker_socket;
+static NSData *broker_certificate;
+static BOOL broker_online = YES;
+static off_t broker_file_size = -1;
+static struct timespec broker_file_time;
+static NSMutableDictionary<NSString *, NSData *> *remote_states;  // Last known peer state, used offline.
 static const int unavailable = (int)0xe00002bc;
 extern void *_swift_stdlib_bridgeErrorToNSError(void *) __attribute__((swiftcall));
 
@@ -71,9 +87,82 @@ static void *diagnostic_swift_error(void *error) {
     return result;
 }
 
+// Mirra injects this adapter into Apple's own sharingd job (setenv + kickstart),
+// so launchd keeps sharingd's service names registered and its clients only
+// reconnect. Only a private settings path travels through launchd's user
+// environment; the broker credentials and log paths are read from that file,
+// and only by sharingd itself. Any other process started in the same instant
+// stays an inert pass-through.
+static BOOL is_sharingd(void) {
+    char path[PATH_MAX];
+    uint32_t size = sizeof(path);
+    return _NSGetExecutablePath(path, &size) == 0 && strcmp(path, "/usr/libexec/sharingd") == 0;
+}
+
+static void redirect(const char *path, int target) {
+    if (!path) return;
+    int fd = open(path, O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (fd < 0) return;
+    if (fd != target) {
+        dup2(fd, target);
+        close(fd);
+    }
+}
+
+static NSString *attested_backup_path;
+// sharingd's sandbox starts in main() and denies creating files in Mirra's
+// folder, so the backup is opened while the adapter loads and kept open.
+static int attested_backup_fd = -1;
+
+static void load_settings(void) {
+    const char *config = getenv("MIRRA_KEYSTORE_CONFIG");
+    if (!config) return;
+    NSString *path = [NSString stringWithUTF8String:config];
+    unsetenv("MIRRA_KEYSTORE_CONFIG");
+    unsetenv("DYLD_INSERT_LIBRARIES");  // Children of sharingd must not inherit the adapter.
+    if (!is_sharingd()) return;
+    struct stat info;
+    if (lstat(path.fileSystemRepresentation, &info) != 0 || !S_ISREG(info.st_mode) ||
+        info.st_uid != getuid() || (info.st_mode & 077) || info.st_size > 65536) return;
+    NSData *data = [NSData dataWithContentsOfFile:path];
+    NSDictionary *settings = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL] : nil;
+    if (![settings isKindOfClass:NSDictionary.class]) return;
+    if ([settings[@"broker_file"] isKindOfClass:NSString.class]) {
+        int fd = open([settings[@"broker_file"] fileSystemRepresentation], O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+        struct stat info;
+        if (fd >= 0 && fstat(fd, &info) == 0 && S_ISREG(info.st_mode) && info.st_uid == getuid() && !(info.st_mode & 077))
+            broker_file_fd = fd;
+        else if (fd >= 0)
+            close(fd);
+    }
+    if ([settings[@"attested_ltk_backup"] isKindOfClass:NSString.class])
+    {
+        int fd = open([settings[@"attested_ltk_backup"] fileSystemRepresentation],
+                      O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
+        struct stat info;
+        if (fd >= 0 && fstat(fd, &info) == 0 && S_ISREG(info.st_mode) && info.st_uid == getuid() &&
+            !(info.st_mode & 077)) {
+            attested_backup_path = [settings[@"attested_ltk_backup"] copy];
+            attested_backup_fd = fd;
+        } else if (fd >= 0) {
+            close(fd);
+        }
+    }
+    redirect([settings[@"stdout"] isKindOfClass:NSString.class] ? [settings[@"stdout"] fileSystemRepresentation] : NULL, STDOUT_FILENO);
+    redirect([settings[@"stderr"] isKindOfClass:NSString.class] ? [settings[@"stderr"] fileSystemRepresentation] : NULL, STDERR_FILENO);
+    NSDictionary *environment = settings[@"environment"];
+    if (![environment isKindOfClass:NSDictionary.class]) return;
+    for (NSString *name in environment) {
+        id value = environment[name];
+        if ([name isKindOfClass:NSString.class] && [name hasPrefix:@"MIRRA_"] && [value isKindOfClass:NSString.class])
+            setenv(name.UTF8String, [value UTF8String], 1);
+    }
+}
+
 static void initialize(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
+        load_settings();
         keys_lock = [NSLock new];
         local_keys = [NSMutableSet set];
         remote_keys = [NSMutableSet set];
@@ -81,7 +170,10 @@ static void initialize(void) {
         const char *certificate_path = getenv("MIRRA_KEYSTORE_DCRT_PATH");
         const char *tcp_port = getenv("MIRRA_KEYSTORE_BROKER_TCP_PORT");
         const char *token = getenv("MIRRA_KEYSTORE_BROKER_TOKEN");
+        broker_lock = [NSLock new];
+        remote_states = [NSMutableDictionary dictionary];
         if (socket_path) broker_path = [NSString stringWithUTF8String:socket_path];
+        broker_socket = broker_path;
         if (certificate_path) dcrt_path = [NSString stringWithUTF8String:certificate_path];
         if (tcp_port && token) {
             long port = strtol(tcp_port, NULL, 10);
@@ -110,6 +202,7 @@ static BOOL transfer(int fd, void *buffer, size_t count, BOOL writing) {
     uint8_t *position = buffer;
     while (count) {
         ssize_t size = writing ? send(fd, position, count, 0) : recv(fd, position, count, 0);
+        if (size < 0 && errno == EINTR) continue;
         if (size <= 0) return NO;
         position += size;
         count -= (size_t)size;
@@ -117,10 +210,58 @@ static BOOL transfer(int fd, void *buffer, size_t count, BOOL writing) {
     return YES;
 }
 
+static void refresh_broker(void) {
+    struct stat info;
+    if (broker_file_fd < 0 || fstat(broker_file_fd, &info) != 0 || info.st_size <= 0 || info.st_size > 65536) return;
+    [broker_lock lock];
+    if (info.st_size != broker_file_size || info.st_mtimespec.tv_sec != broker_file_time.tv_sec ||
+        info.st_mtimespec.tv_nsec != broker_file_time.tv_nsec) {
+        NSMutableData *data = [NSMutableData dataWithLength:(NSUInteger)info.st_size];
+        id value = pread(broker_file_fd, data.mutableBytes, data.length, 0) == (ssize_t)data.length
+            ? [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL] : nil;
+        if ([value isKindOfClass:NSDictionary.class]) {
+            NSDictionary *broker = value;
+            if ([broker[@"socket"] isKindOfClass:NSString.class]) broker_socket = [broker[@"socket"] copy];
+            broker_token = [broker[@"token"] isKindOfClass:NSString.class] ? [broker[@"token"] copy] : nil;
+            if ([broker[@"tcp_port"] isKindOfClass:NSNumber.class]) {
+                long port = [broker[@"tcp_port"] longValue];
+                broker_port = port > 0 && port <= 65535 ? (unsigned short)port : 0;
+            } else {
+                broker_port = 0;
+            }
+            if ([broker[@"certificate"] isKindOfClass:NSString.class]) {
+                NSData *certificate = [[NSData alloc] initWithBase64EncodedString:broker[@"certificate"] options:0];
+                if (certificate.length) broker_certificate = certificate;
+            }
+            broker_online = [broker[@"online"] isKindOfClass:NSNumber.class] && [broker[@"online"] boolValue];
+            broker_file_size = info.st_size;
+            broker_file_time = info.st_mtimespec;
+            fprintf(stderr, "MIRRA_KEYSTORE broker_updated online=%d tcp=%d\n", broker_online, broker_port != 0);
+        }
+    }
+    [broker_lock unlock];
+}
+
+static NSData *current_certificate(void) {
+    refresh_broker();
+    [broker_lock lock];
+    NSData *certificate = broker_certificate;
+    [broker_lock unlock];
+    return certificate.length ? certificate : [NSData dataWithContentsOfFile:dcrt_path];
+}
+
 static NSDictionary *rpc(NSDictionary *request) {
     initialize();
-    if (!broker_path || broker_path.length >= sizeof(((struct sockaddr_un *)0)->sun_path)) return nil;
-    BOOL tcp = broker_port && broker_token.length;
+    if (!broker_path) return nil;
+    refresh_broker();
+    [broker_lock lock];
+    NSString *socket_path = broker_socket;
+    NSString *token = broker_token;
+    unsigned short port = broker_port;
+    BOOL online = broker_online;
+    [broker_lock unlock];
+    if (!online || !socket_path || strlen(socket_path.fileSystemRepresentation) >= sizeof(((struct sockaddr_un *)0)->sun_path)) return nil;
+    BOOL tcp = port && token.length;
     int fd = socket(tcp ? AF_INET : AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) return nil;
     int on = 1;
@@ -133,14 +274,14 @@ static NSDictionary *rpc(NSDictionary *request) {
         struct sockaddr_in address = {0};
         address.sin_len = sizeof(address);
         address.sin_family = AF_INET;
-        address.sin_port = htons(broker_port);
+        address.sin_port = htons(port);
         address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
         connected = connect(fd, (struct sockaddr *)&address, sizeof(address));
     } else {
         struct sockaddr_un address = {0};
         address.sun_len = sizeof(address);
         address.sun_family = AF_UNIX;
-        strlcpy(address.sun_path, broker_path.fileSystemRepresentation, sizeof(address.sun_path));
+        strlcpy(address.sun_path, socket_path.fileSystemRepresentation, sizeof(address.sun_path));
         connected = connect(fd, (struct sockaddr *)&address, sizeof(address));
     }
     if (connected != 0) {
@@ -149,7 +290,7 @@ static NSDictionary *rpc(NSDictionary *request) {
         return nil;
     }
     NSMutableDictionary *wire_request = [request mutableCopy];
-    if (tcp) wire_request[@"_auth"] = broker_token;
+    if (tcp) wire_request[@"_auth"] = token;
     NSData *body = [NSJSONSerialization dataWithJSONObject:wire_request options:0 error:NULL];
     uint32_t size = htonl((uint32_t)body.length);
     BOOL success = body.length <= 262144 && transfer(fd, &size, sizeof(size), YES) &&
@@ -209,7 +350,7 @@ static BOOL virtual_session(int session) {
 static NSData *mirra_copy_dcrt(NSError *__autoreleasing *error) {
     initialize();
     if (!broker_path) return MAECopyDCRTMacOSWithError(error);
-    NSData *certificate = [NSData dataWithContentsOfFile:dcrt_path];
+    NSData *certificate = current_certificate();
     if (!certificate.length && error)
         *error = [NSError errorWithDomain:@"com.apple.MobileActivation.ErrorDomain" code:-1 userInfo:nil];
     fprintf(stderr, "MIRRA_KEYSTORE copyDCRT bytes=%lu\n", (unsigned long)certificate.length);
@@ -223,7 +364,7 @@ static void mirra_issue_dcrt(NSDictionary *options, void *context, void (^comple
         return;
     }
     NSDictionary *health = rpc(@{@"operation": @"health"});
-    BOOL available = [health[@"ready"] boolValue] && [NSData dataWithContentsOfFile:dcrt_path].length > 0;
+    BOOL available = [health[@"ready"] boolValue] && current_certificate().length > 0;
     NSError *error = available ? nil : [NSError errorWithDomain:@"com.apple.MobileActivation.ErrorDomain" code:-1 userInfo:nil];
     if (completion) dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{ completion(error); });
 }
@@ -244,7 +385,14 @@ static int mirra_create(int bag, int key_class, const void *parameters, size_t p
 
 static int mirra_validate(int bag, int key_class, const void *key, size_t size) {
     if (!owns_local(key, size)) return aks_validate_local_key(bag, key_class, key, size);
-    return status(rpc(@{@"operation": @"validate", @"local_ltk": encoded(key, size)}));
+    NSDictionary *response = rpc(@{@"operation": @"validate", @"local_ltk": encoded(key, size)});
+    if (!response) {
+        // Mirra is stopped (or restarting). Keep sharingd from discarding the
+        // pairing; any real authentication still needs the bridge.
+        fprintf(stderr, "MIRRA_KEYSTORE validate_offline assumed_valid=1\n");
+        return 0;
+    }
+    return status(response);
 }
 
 static int mirra_sign(int bag, int local_class, const void *local, size_t local_size, int remote_class,
@@ -335,21 +483,45 @@ static int mirra_state(int bag, const void *remote, size_t remote_size, void *st
     if (!broker_path || !remote || !remote_size || remote_size > 65536)
         return aks_remote_peer_get_state(bag, remote, remote_size, state);
     BOOL known = owns(remote_keys, remote, remote_size);
-    NSDictionary *response = rpc(@{@"operation": @"get_state", @"data": encoded(remote, remote_size)});
+    NSString *key = encoded(remote, remote_size);
+    NSDictionary *response = rpc(@{@"operation": @"get_state", @"data": key});
+    if (known && !response) {
+        [keys_lock lock];
+        NSData *cached = remote_states[key];
+        [keys_lock unlock];
+        if (cached.length == 104) {
+            if (state) memcpy(state, cached.bytes, 104);
+            return 0;
+        }
+    }
     if (!known && !response[@"status"]) return aks_remote_peer_get_state(bag, remote, remote_size, state);
     if (status(response) == 0 && !known) {
         [keys_lock lock];
         [remote_keys addObject:encoded(remote, remote_size)];
         [keys_lock unlock];
     }
-    NSData *data = [[NSData alloc] initWithBase64EncodedString:response[@"data"] ?: @"" options:0];
+    NSData *data = [response[@"data"] isKindOfClass:NSString.class]
+        ? [[NSData alloc] initWithBase64EncodedString:response[@"data"] options:0] : nil;
     if (state && data.length == 104) memcpy(state, data.bytes, 104);
+    if (status(response) == 0 && data.length == 104) {
+        [keys_lock lock];
+        remote_states[key] = data;
+        [keys_lock unlock];
+    }
     return status(response);
 }
 
 static int mirra_drop(int bag, const void *remote, size_t remote_size) {
     if (!owns(remote_keys, remote, remote_size)) return aks_remote_peer_drop(bag, remote, remote_size);
-    return status(rpc(@{@"operation": @"drop", @"data": encoded(remote, remote_size)}));
+    NSString *key = encoded(remote, remote_size);
+    int value = status(rpc(@{@"operation": @"drop", @"data": key}));
+    if (value == 0) {
+        [keys_lock lock];
+        [remote_keys removeObject:key];
+        [remote_states removeObjectForKey:key];
+        [keys_lock unlock];
+    }
+    return value;
 }
 
 DYLD_INTERPOSE(mirra_copy_dcrt, MAECopyDCRTMacOSWithError)
@@ -368,8 +540,142 @@ DYLD_INTERPOSE(mirra_state, aks_remote_peer_get_state)
 DYLD_INTERPOSE(mirra_drop, aks_remote_peer_drop)
 DYLD_INTERPOSE(diagnostic_swift_error, _swift_stdlib_bridgeErrorToNSError)
 
+// ---------------------------------------------------------------------------
+// The iPhone Mirroring pairing keeps a local attested LTK in the login keychain
+// (account com.apple.continuity.auto-unlock.attested). That key is valid only
+// through the bridge, so Apple's unmodified sharingd, which runs while Mirra is
+// stopped, finds it "invalid" and deletes it, forcing a new pairing (and the
+// iPhone passcode) on the next start. While this adapter runs inside sharingd,
+// the item is copied to a private backup whenever sharingd writes it, and put
+// back before sharingd loads its keys. Only sharingd may read this item, which
+// is why this happens here and not in Mirra's own processes.
+
+static NSString *const MirraAttestedAccount = @"com.apple.continuity.auto-unlock.attested";
+
+static BOOL attested_item(CFDictionaryRef query) {
+    if (!query || CFGetTypeID(query) != CFDictionaryGetTypeID()) return NO;
+    CFTypeRef account = CFDictionaryGetValue(query, kSecAttrAccount);
+    return account && CFGetTypeID(account) == CFStringGetTypeID() &&
+        [(__bridge NSString *)account isEqualToString:MirraAttestedAccount];
+}
+
+static NSData *read_attested_backup(void) {
+    struct stat info;
+    if (attested_backup_fd < 0 || fstat(attested_backup_fd, &info) != 0 || info.st_size <= 0 || info.st_size > 65536)
+        return nil;
+    NSMutableData *data = [NSMutableData dataWithLength:(NSUInteger)info.st_size];
+    return pread(attested_backup_fd, data.mutableBytes, data.length, 0) == (ssize_t)data.length ? data : nil;
+}
+
+static void backup_attested_ltk(void) {
+    if (!attested_backup_path) return;
+    CFTypeRef found = NULL;
+    // sharingd keeps this item in the login (file-based) keychain. Platform
+    // processes otherwise search the data protection keychain by default.
+    NSDictionary *query = @{(__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+                            (__bridge id)kSecAttrAccount: MirraAttestedAccount,
+                            (__bridge id)kSecUseDataProtectionKeychain: @NO,
+                            (__bridge id)kSecReturnAttributes: @YES, (__bridge id)kSecReturnData: @YES,
+                            (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitOne};
+    OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &found);
+    NSDictionary *item = status == errSecSuccess ? CFBridgingRelease(found) : nil;
+    if (![item isKindOfClass:NSDictionary.class]) {
+        if (found && status != errSecSuccess) CFRelease(found);
+        static OSStatus reported = 1;
+        if (status != reported && status != errSecItemNotFound)
+            fprintf(stderr, "MIRRA_KEYSTORE attested_ltk backup_failed status=%d\n", (int)status);
+        reported = status;
+        return;
+    }
+    NSMutableDictionary *saved = [NSMutableDictionary dictionary];
+    for (id key in @[(__bridge id)kSecAttrService, (__bridge id)kSecAttrAccount, (__bridge id)kSecAttrLabel,
+                     (__bridge id)kSecAttrIsInvisible, (__bridge id)kSecValueData]) {
+        if (item[key]) saved[key] = item[key];
+    }
+    if (![saved[(__bridge id)kSecValueData] isKindOfClass:NSData.class] ||
+        ![saved[(__bridge id)kSecAttrService] isKindOfClass:NSString.class]) return;
+    NSData *data = [NSPropertyListSerialization dataWithPropertyList:saved format:NSPropertyListBinaryFormat_v1_0
+                                                             options:0 error:NULL];
+    if (!data || [read_attested_backup() isEqualToData:data]) return;
+    // A torn write is rejected when restoring (it no longer parses); the next
+    // pairing then writes a new copy.
+    BOOL written = ftruncate(attested_backup_fd, 0) == 0 &&
+        pwrite(attested_backup_fd, data.bytes, data.length, 0) == (ssize_t)data.length && fsync(attested_backup_fd) == 0;
+    if (written)
+        fprintf(stderr, "MIRRA_KEYSTORE attested_ltk backed_up bytes=%lu\n", (unsigned long)[saved[(__bridge id)kSecValueData] length]);
+    else
+        fprintf(stderr, "MIRRA_KEYSTORE attested_ltk backup_write_failed errno=%d\n", errno);
+}
+
+static void restore_attested_ltk(void) {
+    if (!attested_backup_path) return;
+    NSDictionary *exists = @{(__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+                             (__bridge id)kSecAttrAccount: MirraAttestedAccount,
+                             (__bridge id)kSecUseDataProtectionKeychain: @NO,
+                             (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitOne};
+    OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)exists, NULL);
+    if (status == errSecSuccess) {
+        backup_attested_ltk();  // First session after an update: keep a copy now.
+        return;
+    }
+    NSData *data = read_attested_backup();
+    if (!data) {
+        fprintf(stderr, "MIRRA_KEYSTORE attested_ltk absent backup=none lookup=%d\n", (int)status);
+        return;
+    }
+    NSDictionary *saved = data ? [NSPropertyListSerialization propertyListWithData:data options:0 format:NULL error:NULL] : nil;
+    if (![saved isKindOfClass:NSDictionary.class] ||
+        ![saved[(__bridge id)kSecValueData] isKindOfClass:NSData.class] ||
+        ![saved[(__bridge id)kSecAttrService] isKindOfClass:NSString.class] ||
+        ![saved[(__bridge id)kSecAttrAccount] isEqual:MirraAttestedAccount]) return;
+    NSMutableDictionary *item = [saved mutableCopy];
+    item[(__bridge id)kSecClass] = (__bridge id)kSecClassGenericPassword;
+    item[(__bridge id)kSecUseDataProtectionKeychain] = @NO;
+    status = SecItemAdd((__bridge CFDictionaryRef)item, NULL);
+    fprintf(stderr, "MIRRA_KEYSTORE attested_ltk restored status=%d\n", (int)status);
+}
+
+static dispatch_queue_t attested_backup_queue(void) {
+    static dispatch_once_t once;
+    static dispatch_queue_t queue;
+    dispatch_once(&once, ^{
+        queue = dispatch_queue_create("com.mirra.keystore.attested-backup", DISPATCH_QUEUE_SERIAL);
+    });
+    return queue;
+}
+
+static void schedule_attested_backup(void) {
+    // Runs after sharingd's own write completes and outside its keychain call.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(NSEC_PER_SEC / 2)),
+                   attested_backup_queue(), ^{ backup_attested_ltk(); });
+}
+
+static OSStatus mirra_item_add(CFDictionaryRef attributes, CFTypeRef *result) {
+    OSStatus status = SecItemAdd(attributes, result);
+    if (status == errSecSuccess && attested_backup_path && attested_item(attributes)) schedule_attested_backup();
+    return status;
+}
+
+static OSStatus mirra_item_update(CFDictionaryRef query, CFDictionaryRef attributes) {
+    OSStatus status = SecItemUpdate(query, attributes);
+    if (status == errSecSuccess && attested_backup_path && attested_item(query)) schedule_attested_backup();
+    return status;
+}
+
+DYLD_INTERPOSE(mirra_item_add, SecItemAdd)
+DYLD_INTERPOSE(mirra_item_update, SecItemUpdate)
+
 __attribute__((constructor)) static void loaded(void) {
     initialize();
+    restore_attested_ltk();
+    if (attested_backup_path) {
+        // Also covers a key written through an API other than SecItemAdd/Update.
+        static dispatch_source_t timer;
+        timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, attested_backup_queue());
+        dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC), 10 * NSEC_PER_SEC, 2 * NSEC_PER_SEC);
+        dispatch_source_set_event_handler(timer, ^{ backup_attested_ltk(); });
+        dispatch_resume(timer);
+    }
     if (broker_path) {
         const char *transport = getenv("MIRRA_PAIRING_TRANSPORT");
         if (transport && (strcmp(transport, "wifi") == 0 || strcmp(transport, "wifi-usb") == 0)) {
@@ -425,5 +731,7 @@ __attribute__((constructor)) static void loaded(void) {
             method_setImplementation(getter,replacement);
         }
     }
-    fprintf(stderr, "MIRRA_KEYSTORE_SHIM_LOADED pid=%d enabled=%d\n", getpid(), broker_path != nil);
+    if (broker_path) {
+        fprintf(stderr, "MIRRA_KEYSTORE_SHIM_LOADED pid=%d enabled=1\n", getpid());
+    }
 }

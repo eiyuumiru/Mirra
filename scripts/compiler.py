@@ -10,6 +10,7 @@ import tempfile
 from configuration import ROOT
 from state import write_state
 from macho import require_ios_endpoint
+from bridgeclient import BRIDGE_REVISION
 
 
 def command(arguments):
@@ -64,10 +65,10 @@ def build(sdk_mode='auto', output=None):
         work = Path(temporary)
         candidate = work / 'endpoint'
         common = ['xcrun', 'clang', '-target', 'arm64-apple-ios15.0', '-isysroot', sdk,
-                  '-fobjc-arc', '-fblocks', '-Wall', '-Wextra']
+                  '-fobjc-arc', '-fblocks', '-Wall', '-Wextra', f'-DMIRRA_BRIDGE_REVISION={BRIDGE_REVISION}']
         if mode == 'iphoneos':
             compiled = command([*common, str(source), '-framework', 'Foundation', '-framework', 'Security',
-                                '-o', str(candidate)])
+                                '-framework', 'Network', '-o', str(candidate)])
             report['compiler_diagnostics'] = compiled.stderr
         else:
             obj = work / 'endpoint.o'
@@ -80,7 +81,7 @@ def build(sdk_mode='auto', output=None):
             command(['xcrun', 'clang', '-target', 'arm64-apple-ios15.0', '-isysroot', '/',
                 '-nostdlib', str(obj), '-L', str(stubs), '-F', str(stubs), '-lSystem', '-lobjc',
                 '-framework', 'Foundation', '-framework', 'CoreFoundation', '-framework', 'Security',
-                '-o', str(candidate)])
+                '-framework', 'Network', '-o', str(candidate)])
         metadata = command(['xcrun', 'vtool', '-show-build', str(candidate)]).stdout
         report['executable'] = require_ios_endpoint(candidate)
         if 'platform IOS\n' not in metadata or 'minos 15.0\n' not in metadata:
@@ -93,6 +94,31 @@ def build(sdk_mode='auto', output=None):
             'requires_backend_signing': True, 'report': str(output.with_suffix('.build.json'))}
 
 
+def build_settings(output=None):
+    """Build the Settings → Mirra Bridge PreferenceLoader bundle executable."""
+    output = Path(output or ROOT / 'build/settings').resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    sdk = command(['xcrun', '--sdk', 'macosx', '--show-sdk-path']).stdout.strip()
+    source = ROOT / 'src/phone/settings.m'
+    with tempfile.TemporaryDirectory(prefix='settings-build-', dir=output.parent) as temporary:
+        work = Path(temporary)
+        obj, candidate = work / 'settings.o', work / 'settings'
+        command(['xcrun', 'clang', '-target', 'arm64-apple-ios15.0', '-isysroot', sdk, '-fobjc-arc', '-fblocks',
+                 '-Wall', '-Wextra', '-Wno-incompatible-sysroot', '-c', str(source), '-o', str(obj)])
+        imports = command(['xcrun', 'nm', '-u', str(obj)]).stdout.splitlines()
+        declarations = json.loads((ROOT / 'config/symbols.json').read_text())
+        stubs = work / 'stubs'
+        write_link_stubs(stubs, imports, declarations)
+        command(['xcrun', 'clang', '-target', 'arm64-apple-ios15.0', '-isysroot', '/', '-bundle',
+            '-nostdlib', str(obj), '-L', str(stubs), '-F', str(stubs), '-lSystem', '-lobjc',
+            '-framework', 'Foundation', '-framework', 'CoreFoundation', '-o', str(candidate)])
+        metadata = command(['xcrun', 'vtool', '-show-build', str(candidate)]).stdout
+        if 'platform IOS\n' not in metadata or 'minos 15.0\n' not in metadata:
+            raise RuntimeError('Built Settings bundle is not an iOS 15+ Mach-O')
+        os.replace(candidate, output)
+    return {'output': str(output), 'source_sha256': hashlib.sha256(source.read_bytes()).hexdigest()}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--sdk', choices=['auto', 'iphoneos', 'macosx-headers'], default='auto')
@@ -100,6 +126,8 @@ def main():
     args = parser.parse_args()
     try:
         print(json.dumps(build(args.sdk, args.output), indent=2))
+        if not args.output:
+            print(json.dumps(build_settings(), indent=2))
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
         parser.exit(1, str(error) + '\n')
 

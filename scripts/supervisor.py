@@ -34,12 +34,27 @@ def backend_children_stopped(previous=None):
         path = Path(previous) / 'backend-children.json'
         if path.exists():
             record = json.loads(path.read_text())
-            for birth in record.values():
+            detached = detached_sharingd_pid()
+            for name, birth in record.items():
                 if not isinstance(birth, list) or len(birth) != 4:
                     raise ValueError('Invalid backend child identity')
+                # A detached sharingd intentionally outlives its session; the
+                # adapter is already mapped and logs to a stable file.
+                if name == 'sharingd' and detached is not None and birth[0] == detached:
+                    continue
                 if process_birth(birth[0]) == tuple(birth):
                     return False
     return True
+
+
+def detached_sharingd_pid():
+    try:
+        record = SharingdAgent().read_journal()
+    except (OSError, ValueError, RuntimeError):
+        return None
+    if record and record.get('detached') is True and type(record.get('injected_pid')) is int:
+        return record['injected_pid']
+    return None
 
 
 @contextmanager
@@ -134,7 +149,20 @@ class NativeBackend:
                             continue
                         if event.get('NATIVE_WORKSPACE_READY') and not requested_stop:
                             ready_at = time.monotonic()
-                            self.publish('ready', reason=None, controller_pid=event.get('controller_pid'))
+                            self.publish('ready', reason=None, controller_pid=event.get('controller_pid'),
+                                         certificate_issue=None, certificate_retry_at=None)
+                        elif event.get('BRIDGE_CERTIFICATE_RENEWAL') is True and not requested_stop:
+                            # The existing issuer request may take up to 70s,
+                            # with a separate download and certificate check.
+                            deadline = max(deadline, time.monotonic() + 105)
+                            self.publish('starting', certificate_issue='renewing', certificate_retry_at=None)
+                        elif ((issue := event.get('BRIDGE_CERTIFICATE_ERROR')) and issue != 'busy'
+                              and not requested_stop):
+                            # A lock collision leaves the last certificate observation intact.
+                            self.publish('starting', certificate_issue=issue,
+                                         certificate_retry_at=event.get('retry_at'))
+                        elif event.get('BRIDGE_CERTIFICATE_READY') is True and not requested_stop:
+                            self.publish('starting', certificate_issue=None, certificate_retry_at=None)
                         elif event.get('BACKEND_LOST'):
                             self.publish('restoring', reason='backend health failed')
                     if len(buffered) > 65536:

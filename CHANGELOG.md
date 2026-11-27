@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.2.0
+
+- Replace the legacy macOS interface with SwiftUI, including guided pairing,
+  service settings and diagnostics.
+- Move runtime bridge communication, keystore operations and native service
+  lifecycle control to the Rust CLI. Keep the Python setup and installation
+  dependencies and the Objective-C endpoint and native hooks that remain active.
+- Add persistent Mirra Bridge service pairing over Wi-Fi or USB using the token
+  in the phone's Settings. Install and update the service through verified SSH,
+  preserve pairing credentials during updates, and support certificate renewal.
+- Remove superseded Python entry points, the retired CLI shim, unused probes and
+  native experiments. Include all Rust modules in source exports and check their
+  completeness.
+- Restore endpoint and keystore fixture builds. Interrupt stalled Python bridge
+  requests during shutdown and update regressions for the service transport.
+- Preserve existing support when an older SSH profile needs service pairing or a
+  replacement token or certificate is missing, before stopping support or
+  restoring sharingd.
+
+Validation passed 406 Rust tests, 422 Python regressions, 36 Swift interface
+checks, 133 endpoint protocol scenarios and the native authorization, keystore,
+symbol, AWDL, compatibility, environment, decoder, certificate and media checks.
+The app builds with its bundled runtime; signatures, hash manifests, source
+exports and deployment targets are checked locally. These checks do not replace
+a fresh physical-device mirroring test or expand the documented compatibility
+limits. Local builds use ad-hoc signing and are not notarized.
+
 ## 0.1.3
 
 - Require a fresh iPhone Mirroring launch after background recovery replaces
