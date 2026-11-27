@@ -161,12 +161,24 @@ class SupportStatusTests(unittest.TestCase):
             self.assertEqual(observe(self.service)['state'], 'unknown')
 
     def test_legacy_package_offers_update_without_reprovisioning_or_mutation(self):
+        write_state(self.service.package / 'config.json', {
+            'backend': {'transport': 'ssh', 'service': {'token_file': str(self.service.package / 'private/token')}}
+        })
         self.service.validate_package.return_value = {'schema_version': 4}
         with patch.object(self.service, 'stop') as stop, patch.object(self.service, 'prepare') as prepare:
             result = observe(self.service)
         self.assertEqual(result['state'], 'update_available')
         self.assertIn('install', result['actions'])
         self.assertNotIn('setup', result['actions'])
+        stop.assert_not_called(); prepare.assert_not_called()
+        self.service.status.assert_not_called()
+
+    def test_ssh_era_legacy_package_directs_user_to_setup_instead_of_install(self):
+        self.service.validate_package.return_value = {'schema_version': 4}
+        with patch.object(self.service, 'stop') as stop, patch.object(self.service, 'prepare') as prepare:
+            result = observe(self.service)
+        self.assertEqual(result['state'], 'setup_required')
+        self.assertEqual(result['actions'], ['setup', 'guide'])
         stop.assert_not_called(); prepare.assert_not_called()
         self.service.status.assert_not_called()
 

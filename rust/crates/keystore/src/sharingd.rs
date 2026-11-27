@@ -228,14 +228,28 @@ fn read_plist(path: &Path) -> Result<(Option<Dict>, Format)> {
 }
 
 fn write_plist(path: &Path, value: Dict, format: Format, mode: u32) -> Result<()> {
-    let mut name = std::ffi::OsString::from(".");
-    name.push(path.file_name().unwrap_or_default());
-    name.push(".mirra");
-    let temporary = path.with_file_name(name);
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
     let data = plist::dumps(&Plist::Dict(value), format)?;
-    std::fs::write(&temporary, data).map_err(|e| Error::with_path(e, &temporary))?;
-    util::chmod(&temporary, mode).map_err(|e| Error::with_path(e, &temporary))?;
-    std::fs::rename(&temporary, path).map_err(|e| Error::with_path(e, &temporary))?;
+    let (file, temporary) = mirra_core::state::named_temporary(parent, ".plist-")
+        .map_err(|e| Error::with_path(e, parent))?;
+    let written = unsafe {
+        if libc::fchmod(file.as_raw_fd(), mode as libc::mode_t) != 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+    .and_then(|_| sys::write_all(file.as_raw_fd(), &data))
+    .and_then(|_| sys::fsync(file.as_raw_fd()));
+    drop(file);
+    if let Err(error) = written {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(Error::with_path(error, &temporary));
+    }
+    if let Err(error) = std::fs::rename(&temporary, path) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(Error::with_path(error, path));
+    }
     Ok(())
 }
 

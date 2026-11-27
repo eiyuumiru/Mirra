@@ -211,10 +211,25 @@ pub fn observe_with(service: &dyn SupportService, probes: &Probes, timeout: Dura
 
 fn observe_installed(service: &dyn SupportService, probes: &Probes, timeout: Duration, manifest: &Object) -> Result<Value> {
     let package = service.package();
-    let configuration = load_config(Some(&package.join("config.json")), &probes.config_root)?;
+    let config_path = package.join("config.json");
+    let configuration = load_config(Some(&config_path), &probes.config_root)?;
     let transport = Some(configuration.transport.as_str());
     let t = transport;
     if needs_update(manifest)? {
+        let saved: Value = std::fs::read_to_string(&config_path)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or(Value::Null);
+        let has_token = saved.get("backend")
+            .and_then(|b| b.get("service"))
+            .and_then(|s| s.get("token_file"))
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty());
+        if !has_token {
+            return Ok(report("setup_required", "Pair with Mirra Bridge",
+                "This older SSH installation needs Mirra Bridge service pairing before updating. Open Setup to pair your iPhone; existing support stays preserved until setup finishes.",
+                &["setup", "guide"], t));
+        }
         return Ok(report("update_available", "Update Mirra support",
             "Choose Update and connect to install this version’s support using your saved bridge setup.", &["install", "guide"], t));
     }

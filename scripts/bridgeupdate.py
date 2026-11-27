@@ -114,6 +114,19 @@ mv -f {quote(str(candidate))} {quote(str(target))}
 restart
 ''')
             confirm_revision(config, token)
+        except RemoteSetupError as error:
+            if error.code in ('sudo_password_required', 'sudo_password_rejected'):
+                raise
+            remove_stage = False
+            access.run(f'''set -e
+{restart}
+if test -f {quote(str(backup))}; then
+    mv -f {quote(str(backup))} {quote(str(target))}
+    restart
+fi
+''')
+            remove_stage = True
+            raise
         except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
             remove_stage = False
             access.run(f'''set -e

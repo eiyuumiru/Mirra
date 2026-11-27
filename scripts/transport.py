@@ -17,7 +17,7 @@ PROTOCOL_VERSION = 2
 TRANSPORT_ERRORS = {'endpoint_reply_timeout', 'endpoint_write_timeout', 'endpoint_eof',
                     'endpoint_disconnected', 'endpoint_unavailable', 'endpoint_invalid_reply',
                     'endpoint_reply_too_large', 'endpoint_io_error'}
-ENDPOINT_OPERATIONS = {'generate', 'validate', 'sign_remote', 'session_signed', 'step',
+ENDPOINT_OPERATIONS = {'generate', 'identities', 'validate', 'sign_remote', 'session_signed', 'step',
                        'token', 'confirm', 'setup', 'reset', 'get_state', 'drop', 'exit', 'forget'}
 GREETING_ERRORS = {'required_keystore_symbols_unavailable', 'keystore_library_unavailable',
                    'device_certificate_unavailable'}
@@ -124,52 +124,57 @@ class Endpoint:
 
     def poll(self):
         """None while the session is connected; 0 once the bridge has closed it."""
-        if self.socket is None:
+        if self._closed or self._closing or self.socket is None:
             return 0
         if not self._lock.acquire(blocking=False):
             return None  # A request is in flight; its own result reports failures.
         try:
+            if self._closed or self._closing or self.socket is None:
+                return 0
             return 0 if self.socket.disconnected() else None
         finally:
             self._lock.release()
 
     def call(self, operation, *, _deadline=None, **fields):
         with self._lock:
-            if self._failed or (self._closing and operation != 'exit') or self.socket is None:
-                raise self._error('Bridge session is unavailable; start a new session', 'endpoint_unavailable')
-            if self.socket.closed:
-                error = self._error('Bridge session is unavailable; start a new session', 'endpoint_disconnected')
-                self.failure = self.failure or error
-                raise error
-            payload = json.dumps({'operation': operation, **fields}).encode()
-            activity.emit('Endpoint', 'request', operation=operation, parameters=fields, request_bytes=len(payload))
-            if len(payload) > MAX_REPLY:
-                raise ValueError('Bridge request exceeds the size limit')
-            deadline = time.monotonic() + self.timeout
-            if _deadline is not None:
-                deadline = min(deadline, _deadline)
-            stage = 'write'
+            return self._call_locked(operation, _deadline=_deadline, **fields)
+
+    def _call_locked(self, operation, *, _deadline=None, **fields):
+        if self._failed or (self._closing and operation != 'exit') or self.socket is None:
+            raise self._error('Bridge session is unavailable; start a new session', 'endpoint_unavailable')
+        if self.socket.closed:
+            error = self._error('Bridge session is unavailable; start a new session', 'endpoint_disconnected')
+            self.failure = self.failure or error
+            raise error
+        payload = json.dumps({'operation': operation, **fields}).encode()
+        activity.emit('Endpoint', 'request', operation=operation, parameters=fields, request_bytes=len(payload))
+        if len(payload) > MAX_REPLY:
+            raise ValueError('Bridge request exceeds the size limit')
+        deadline = time.monotonic() + self.timeout
+        if _deadline is not None:
+            deadline = min(deadline, _deadline)
+        stage = 'write'
+        try:
             try:
-                try:
-                    self.socket.send_text(payload, deadline)
-                except BridgeTimeout as error:
-                    raise self._error('Bridge request timed out', 'endpoint_write_timeout',
-                                      request_bytes=len(payload)) from error
-                stage = 'reply'
-                return self.read(deadline=deadline)
-            except (OSError, ValueError, EndpointError) as error:
-                # A delayed reply can no longer be matched to a future request.
-                # Replacing the connection would also lose all keybag state.
-                self._failed = True
-                if isinstance(error, EndpointError):
-                    failure = EndpointError(str(error), error.code, dict(error.details))
-                else:
-                    failure = self._error('Bridge transport I/O failed; start a new session',
-                                          'endpoint_io_error', stage=stage)
-                if isinstance(operation, str) and operation in ENDPOINT_OPERATIONS:
-                    failure.details['operation'] = operation
-                self.failure = self.failure or failure
-                raise failure from error
+                self.socket.send_text(payload, deadline)
+            except BridgeTimeout as error:
+                raise self._error('Bridge request timed out', 'endpoint_write_timeout',
+                                  request_bytes=len(payload)) from error
+            stage = 'reply'
+            return self.read(deadline=deadline)
+        except (OSError, ValueError, EndpointError) as error:
+            # A delayed reply can no longer be matched to a future request.
+            # Replacing the connection would also lose all keybag state.
+            self._failed = True
+            if isinstance(error, EndpointError):
+                failure = EndpointError(str(error), error.code, dict(error.details))
+            else:
+                failure = self._error('Bridge transport I/O failed; start a new session',
+                                      'endpoint_io_error', stage=stage)
+            if isinstance(operation, str) and operation in ENDPOINT_OPERATIONS:
+                failure.details['operation'] = operation
+            self.failure = self.failure or failure
+            raise failure from error
 
     def close(self):
         if self._closed:
@@ -177,25 +182,30 @@ class Endpoint:
         self._closing = True
         # A request already waiting on a stalled bridge must not prevent
         # shutdown from closing the connection and releasing the controller.
-        if self._lock.acquire(blocking=False):
-            self._lock.release()
-        else:
+        acquired = self._lock.acquire(blocking=False)
+        if not acquired:
             self._failed = True
             if self.socket is not None:
                 self.socket.interrupt()
             # Keep the descriptor open until the interrupted reader unwinds;
             # closing it first can leave Darwin's timed recv waiting on it.
-            if self._lock.acquire(timeout=2):
-                self._lock.release()
-        self.timeout = min(self.timeout, 2)
-        if self.socket is not None:
-            if not self._failed and not self.socket.closed:
-                try:
-                    self.call('exit')
-                except EndpointError:
-                    pass
-            self.socket.close()
-        self._closed = True
+            acquired = self._lock.acquire(timeout=2)
+        if not acquired:
+            return
+        try:
+            if self._closed:
+                return
+            self.timeout = min(self.timeout, 2)
+            if self.socket is not None:
+                if not self._failed and not self.socket.closed:
+                    try:
+                        self._call_locked('exit')
+                    except EndpointError:
+                        pass
+                self.socket.close()
+            self._closed = True
+        finally:
+            self._lock.release()
 
     def __enter__(self):
         return self

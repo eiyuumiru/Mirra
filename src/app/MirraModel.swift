@@ -50,6 +50,7 @@ struct Notice {
 }
 
 struct PasswordRequest {
+    let id = UUID()
     var prompt: String
     var reply: (String?) -> Void
 }
@@ -102,9 +103,9 @@ final class MirraModel: ObservableObject {
 
     func navigate(to destination: Page) {
         guard !busy, page != destination else { return }
+        pendingConnect = false
         if destination == .setup {
             revision += 1
-            pendingConnect = false
         } else if page == .setup {
             revision += 1
             token = ""
@@ -149,7 +150,10 @@ final class MirraModel: ObservableObject {
         }
     }
 
-    func start() async { await control(report.actions.contains("install") ? "install" : "start") }
+    func start() async {
+        pendingConnect = false
+        await control(report.actions.contains("install") ? "install" : "start")
+    }
 
     func updateBridge() async {
         guard !busy, report.actions.contains("update_bridge") else { return }
@@ -199,7 +203,10 @@ final class MirraModel: ObservableObject {
         await control("reset")
     }
 
-    func importProfile(_ url: URL) async { await control("install", profile: url) }
+    func importProfile(_ url: URL) async {
+        pendingConnect = false
+        await control("install", profile: url)
+    }
 
     private func continueConnection() async {
         guard pendingConnect else { return }
@@ -328,7 +335,8 @@ final class MirraModel: ObservableObject {
     }
 
     var canSubmitSetup: Bool {
-        guard !busy, !scanning, let mode else { return false }
+        guard !busy, let mode else { return false }
+        if transport == .usb && scanning { return false }
         if setupStatus.phase == .trust { return setupStatus.fingerprint?.isEmpty == false }
         if let phase = setupStatus.phase, phase != .new { return true }
         guard let number = Int(port.trimmingCharacters(in: .whitespaces)), (1...65535).contains(number) else { return false }

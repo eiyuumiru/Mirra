@@ -297,7 +297,7 @@ impl FileLog {
                 return Err(private_error("Activity backup must be a private regular file"));
             }
             sys::ftruncate(backup.as_raw_fd(), 0)?;
-            sys::write(backup.as_raw_fd(), &tail)?;
+            sys::write_all(backup.as_raw_fd(), &tail)?;
             drop(backup);
             sys::ftruncate(fd.as_raw_fd(), 0)?;
         }

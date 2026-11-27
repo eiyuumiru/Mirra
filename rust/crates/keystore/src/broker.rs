@@ -8,7 +8,6 @@
 use std::io::{ErrorKind, Read, Write};
 use std::net::{Shutdown, TcpListener};
 use std::os::fd::{AsRawFd, RawFd};
-use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -102,9 +101,14 @@ fn run(arguments: &BrokerArgs) -> Result<(), Failure> {
         return Err(Failure::exit("Socket path is too long or already exists"));
     }
     let parent = parent_of(&arguments.socket);
-    let info = sys::stat(&parent).map_err(|e| mirra_core::Error::with_path(e, &parent))?;
-    if info.st_uid != sys::getuid() || info.st_mode & 0o077 != 0 {
+    let info = sys::lstat(&parent).map_err(|e| mirra_core::Error::with_path(e, &parent))?;
+    if !sys::private_owned(&info, true) {
         return Err(Failure::exit("Socket parent must be owned by this user with mode 0700"));
+    }
+    let state_parent = parent_of(&arguments.state_file);
+    let state_info = sys::lstat(&state_parent).map_err(|e| mirra_core::Error::with_path(e, &state_parent))?;
+    if !sys::private_owned(&state_info, true) {
+        return Err(Failure::exit("State parent must be owned by this user with mode 0700"));
     }
     let source = arguments.certificate.clone().unwrap_or_else(|| configuration.certificate_file.clone());
     let certificate_bytes = std::fs::read(&source).map_err(|e| mirra_core::Error::with_path(e, &source))?;
@@ -198,32 +202,58 @@ fn startup(broker: &mut AksBroker<Arc<dyn Backend>>, setup: &BrokerSetup, emit: 
     Ok(())
 }
 
+fn write_private_atomic(path: &Path, prefix: &str, data: &[u8]) -> Result<(), Failure> {
+    let parent = parent_of(path);
+    let (file, temporary) = mirra_core::state::named_temporary(&parent, prefix)
+        .map_err(|e| mirra_core::Error::with_path(e, &parent))?;
+    let written = sys::write_all(file.as_raw_fd(), data).and_then(|_| sys::fsync(file.as_raw_fd()));
+    drop(file);
+    if let Err(error) = written {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(mirra_core::Error::with_path(error, &temporary).into());
+    }
+    if let Err(error) = std::fs::rename(&temporary, path) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(mirra_core::Error::with_path(error, path).into());
+    }
+    Ok(())
+}
+
+const MAX_CONCURRENT_REQUESTS: usize = 32;
+
+struct ActiveGuard(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for ActiveGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
 fn listen(setup: &BrokerSetup, broker: AksBroker<Arc<dyn Backend>>, endpoint: &Arc<dyn Backend>, stop: &Event, emit: Emit)
     -> Result<(), Failure> {
     let unix = UnixListener::bind(&setup.socket).map_err(|e| mirra_core::Error::with_path(e, &setup.socket))?;
     let cleanup = SocketFile(setup.socket.clone());
+    unix.set_nonblocking(true).map_err(|e| mirra_core::Error::with_path(e, &setup.socket))?;
     util::chmod(&setup.socket, 0o600)?;
     let tcp = TcpListener::bind(("127.0.0.1", 0))?;
+    tcp.set_nonblocking(true)?;
     let port = tcp.local_addr()?.port();
     let directory = parent_of(&setup.socket);
     let certificate = directory.join("certificate.der");
     if setup.certificate_argument.as_deref().map(paths::normalize) != Some(paths::normalize(&certificate)) {
-        std::fs::write(&certificate, &setup.certificate).map_err(|e| mirra_core::Error::with_path(e, &certificate))?;
-        util::chmod(&certificate, 0o600)?;
+        write_private_atomic(&certificate, ".certificate-", &setup.certificate)?;
     }
     let token = util::token_hex(32);
     let state = json!({"pid": std::process::id(), "socket": text(&setup.socket), "directory": text(&directory),
         "tcp_port": port, "auth_token": token, "certificate": text(&certificate)});
-    let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600)
-        .open(&setup.state_file).map_err(|e| mirra_core::Error::with_path(e, &setup.state_file))?;
-    file.write_all(format!("{}\n", pyjson::dumps(&state)).as_bytes())?;
-    drop(file);
-    util::chmod(&setup.state_file, 0o600)?;
+    let state_bytes = format!("{}\n", pyjson::dumps(&state));
+    write_private_atomic(&setup.state_file, ".broker-state-", state_bytes.as_bytes())?;
     let shared = Arc::new(Shared { broker: Mutex::new(broker), token, emit: emit.clone() });
+    let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let tcp_thread = {
-        let (shared, stop) = (shared.clone(), stop.clone());
+        let (shared, stop, active) = (shared.clone(), stop.clone(), active.clone());
         std::thread::Builder::new().name("broker-tcp".into()).spawn(move || {
-            accept_loop(tcp.as_raw_fd(), &stop, || tcp.accept().map(|(s, _)| s), move |stream| serve_tcp(stream, &shared))
+            accept_loop(tcp.as_raw_fd(), &stop, &active, || tcp.accept().map(|(s, _)| s), move |stream| serve_tcp(stream, &shared))
         })?
     };
     emit(&json!({"ready": true, "socket": text(&setup.socket), "tcp_port": port,
@@ -231,7 +261,7 @@ fn listen(setup: &BrokerSetup, broker: AksBroker<Arc<dyn Backend>>, endpoint: &A
         "certificate_binding_verified": endpoint.certificate_binding_verified()}));
     {
         let shared = shared.clone();
-        accept_loop(unix.as_raw_fd(), stop, || unix.accept().map(|(s, _)| s), move |stream| serve_unix(stream, &shared));
+        accept_loop(unix.as_raw_fd(), stop, &active, || unix.accept().map(|(s, _)| s), move |stream| serve_unix(stream, &shared));
     }
     stop.set();
     let _ = tcp_thread.join();
@@ -249,23 +279,42 @@ impl Drop for SocketFile {
     }
 }
 
-/// `serve_forever(poll_interval=0.2)`: accept until `stop`, one thread per
-/// connection.
-fn accept_loop<S, A, H>(fd: RawFd, stop: &Event, accept: A, handler: H)
+/// `serve_forever(poll_interval=0.2)`: accept until `stop`, bounded worker
+/// threads per connection.
+fn accept_loop<S, A, H>(fd: RawFd, stop: &Event, active: &Arc<std::sync::atomic::AtomicUsize>, accept: A, handler: H)
 where
     S: Send + 'static,
     A: Fn() -> std::io::Result<S>,
     H: Fn(S) + Send + Sync + Clone + 'static,
 {
+    use std::sync::atomic::Ordering;
     while !stop.is_set() {
         let mut entry = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
         let ready = unsafe { libc::poll(&mut entry, 1, POLL_INTERVAL.as_millis() as i32) };
         if ready <= 0 {
             continue;
         }
-        if let Ok(stream) = accept() {
-            let handler = handler.clone();
-            let _ = std::thread::Builder::new().name("broker-request".into()).spawn(move || handler(stream));
+        loop {
+            match accept() {
+                Ok(stream) => {
+                    let prev = active.fetch_add(1, Ordering::AcqRel);
+                    if prev >= MAX_CONCURRENT_REQUESTS {
+                        active.fetch_sub(1, Ordering::AcqRel);
+                        drop(stream);
+                        continue;
+                    }
+                    let guard = ActiveGuard(active.clone());
+                    let handler = handler.clone();
+                    if std::thread::Builder::new().name("broker-request".into()).spawn(move || {
+                        let _guard = guard;
+                        handler(stream);
+                    }).is_err() {
+                        // Guard drops automatically on spawn failure.
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(_) => break,
+            }
         }
     }
 }

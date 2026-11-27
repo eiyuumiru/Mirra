@@ -25,7 +25,7 @@ struct MirraView: View {
                 switch model.page {
                 case .setup: SetupView(model: model) { importing = true }
                 case .settings: settings
-                case .logs: LogsView(hardware: model.hardwareEntries)
+                case .logs: LogsView(model: model)
                 }
             }
             .navigationTitle(model.page.rawValue)
@@ -50,6 +50,7 @@ struct MirraView: View {
         })) {
             if let request = model.passwordRequest {
                 PasswordView(prompt: request.prompt, answer: model.answerPassword)
+                    .id(request.id)
             }
         }
         .fileImporter(isPresented: $importing, allowedContentTypes: [.json]) { result in

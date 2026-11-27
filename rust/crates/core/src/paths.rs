@@ -13,23 +13,37 @@ fn from_bytes(value: Vec<u8>) -> PathBuf {
 }
 
 fn home_of(user: Option<&[u8]>) -> Option<Vec<u8>> {
-    unsafe {
-        let entry = match user {
-            None => {
-                if let Some(home) = std::env::var_os("HOME") {
-                    return Some(home.into_vec());
+    if user.is_none() {
+        if let Some(home) = std::env::var_os("HOME") {
+            return Some(home.into_vec());
+        }
+    }
+    let mut size = 1024usize;
+    loop {
+        let mut buffer = vec![0u8; size];
+        let mut pwd = std::mem::MaybeUninit::<libc::passwd>::uninit();
+        let mut result: *mut libc::passwd = std::ptr::null_mut();
+        let code = unsafe {
+            match user {
+                None => libc::getpwuid_r(libc::getuid(), pwd.as_mut_ptr(), buffer.as_mut_ptr().cast(), buffer.len(), &mut result),
+                Some(name) => {
+                    let name = std::ffi::CString::new(name).ok()?;
+                    libc::getpwnam_r(name.as_ptr(), pwd.as_mut_ptr(), buffer.as_mut_ptr().cast(), buffer.len(), &mut result)
                 }
-                libc::getpwuid(libc::getuid())
-            }
-            Some(name) => {
-                let name = std::ffi::CString::new(name).ok()?;
-                libc::getpwnam(name.as_ptr())
             }
         };
-        if entry.is_null() || (*entry).pw_dir.is_null() {
+        if code == libc::ERANGE && size < 65536 {
+            size *= 2;
+            continue;
+        }
+        if code != 0 || result.is_null() {
             return None;
         }
-        Some(CStr::from_ptr((*entry).pw_dir).to_bytes().to_vec())
+        let dir = unsafe { (*result).pw_dir };
+        if dir.is_null() {
+            return None;
+        }
+        return Some(unsafe { CStr::from_ptr(dir) }.to_bytes().to_vec());
     }
 }
 

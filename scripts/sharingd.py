@@ -23,6 +23,7 @@ import plistlib
 import re
 import stat
 import subprocess
+import tempfile
 import time
 
 from processes import process_birth
@@ -104,10 +105,23 @@ def _read_plist(path):
 
 
 def _write_plist(path, value, fmt, mode):
-    temporary = path.with_name('.' + path.name + '.mirra')
-    temporary.write_bytes(plistlib.dumps(value, fmt=fmt))
-    temporary.chmod(mode)
-    os.replace(temporary, path)
+    data = plistlib.dumps(value, fmt=fmt)
+    descriptor, temporary = tempfile.mkstemp(prefix='.' + path.name + '.', suffix='.mirra', dir=path.parent)
+    try:
+        os.fchmod(descriptor, mode)
+        os.write(descriptor, data)
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = -1
+        os.replace(temporary, path)
+    except BaseException:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
 
 
 def backup_pairing(backup):

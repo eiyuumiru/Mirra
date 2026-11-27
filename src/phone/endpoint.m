@@ -993,7 +993,11 @@ static NSDictionary *bridge_request(NSMutableDictionary *bridge, const KeyStore 
             NSData *local = identity[@"ltk"];
             unsigned int flags = [request[@"flags"] unsignedIntValue];
             NSString *params_encoded = request[@"parameters"];
-            NSData *session_params = [params_encoded isKindOfClass:NSString.class] ? [[NSData alloc] initWithBase64EncodedString:params_encoded options:0] : nil;
+            NSData *session_params = nil;
+            if ([params_encoded isKindOfClass:NSString.class] && params_encoded.length) {
+                session_params = [[NSData alloc] initWithBase64EncodedString:params_encoded options:0];
+                if (!session_params) return @{@"error": @"invalid_request_fields"};
+            }
             if (session_params.length > 65536) {
                 return @{@"error": @"parameters_too_large"};
             }
@@ -1083,7 +1087,11 @@ static NSDictionary *bridge_request(NSMutableDictionary *bridge, const KeyStore 
                 return reset;
             }
             NSString *encoded = request[@"data"];
-            NSData *input = [encoded isKindOfClass:NSString.class] ? [[NSData alloc] initWithBase64EncodedString:encoded options:0] : nil;
+            NSData *input = nil;
+            if ([encoded isKindOfClass:NSString.class] && encoded.length) {
+                input = [[NSData alloc] initWithBase64EncodedString:encoded options:0];
+                if (!input) return @{@"error": @"invalid_request_fields"};
+            }
             if (input.length > 65536) {
                 return @{@"error": @"token_too_large"};
             }
@@ -1341,6 +1349,7 @@ static void persist_client(NSMutableDictionary *bridge, const KeyStore *store) {
         NSString *identifier = remote_owners[encoded][@"identifier"];
         if (identifier && saved[identifier]) owners[encoded] = identifier;
     }
+    if (!saved.count && !previous) return;
     NSNumber *now = @((long long)time(NULL));
     NSDictionary *record = @{@"version": @1, @"client": client, @"name": bridge[@"client_name"] ?: @"Mac",
                              @"created": previous[@"created"] ?: now, @"last_seen": now,
@@ -1698,14 +1707,18 @@ static void open_websocket(nw_connection_t connection, NSMutableDictionary *cont
     websocket_json(connection, greeting, NO);
 }
 
-static void websocket_message(nw_connection_t connection, NSMutableDictionary *context, NSData *payload) {
+static BOOL websocket_message(nw_connection_t connection, NSMutableDictionary *context, NSData *payload) {
     NSDictionary *request = [NSJSONSerialization JSONObjectWithData:payload options:0 error:NULL];
-    if (![request isKindOfClass:NSDictionary.class]) { websocket_json(connection, @{@"error": @"invalid_json"}, NO); return; }
-    if (!valid_request_fields(request)) { websocket_json(connection, @{@"error": @"invalid_request_fields"}, NO); return; }
+    if (![request isKindOfClass:NSDictionary.class]) { websocket_json(connection, @{@"error": @"invalid_json"}, NO); return YES; }
+    if (!valid_request_fields(request)) { websocket_json(connection, @{@"error": @"invalid_request_fields"}, NO); return YES; }
     BOOL close = NO;
     NSDictionary *response = bridge_request(context[@"session"], &bridge_keys, request, &close);
     websocket_json(connection, response, NO);
-    if (close) websocket_close(connection, 1000);
+    if (close) {
+        websocket_close(connection, 1000);
+        return NO;
+    }
+    return YES;
 }
 
 // Returns NO once the connection is being closed.
@@ -1743,12 +1756,21 @@ static BOOL websocket_frames(nw_connection_t connection, NSMutableDictionary *co
         if (opcode == 0xA) continue;
         if (opcode != 0x1 || !final) { websocket_close(connection, 1003); return NO; }
         if (!context[@"session"]) { websocket_close(connection, 1011); return NO; }
-        websocket_message(connection, context, payload);
+        if (!websocket_message(connection, context, payload)) return NO;
     }
     return YES;
 }
 
-static void certificate_route(nw_connection_t connection, NSData *body) {
+static dispatch_queue_t certificate_queue(void) {
+    static dispatch_once_t once;
+    static dispatch_queue_t queue;
+    dispatch_once(&once, ^{
+        queue = dispatch_queue_create("com.mirra.bridge.certificate", DISPATCH_QUEUE_SERIAL);
+    });
+    return queue;
+}
+
+static void certificate_route(nw_connection_t connection, NSMutableDictionary *context, NSData *body) {
     NSDictionary *request = body.length ? [NSJSONSerialization JSONObjectWithData:body options:0 error:NULL] : [NSDictionary dictionary];
     if (![request isKindOfClass:NSDictionary.class] ||
         (request[@"issue"] && ![request[@"issue"] isKindOfClass:NSNumber.class])) {
@@ -1771,15 +1793,21 @@ static void certificate_route(nw_connection_t connection, NSData *body) {
             return;
         }
     }
-    NSData *certificate = nil;
-    NSDictionary *result = copy_certificate(issue, replace_digest, &certificate);
-    if (!certificate) { http_json(connection, 409, result); return; }
-    if (!write_private_file(certificate_path(), certificate)) {
-        http_json(connection, 500, @{@"error": @"certificate_write_failed"});
-        return;
-    }
-    publish_preferences();
-    http_json(connection, 200, result);
+    // Certificate issuance can wait up to 52s; keep bridge_queue free for live WebSocket RPCs.
+    dispatch_async(certificate_queue(), ^{
+        NSData *certificate = nil;
+        NSDictionary *result = copy_certificate(issue, replace_digest, &certificate);
+        dispatch_async(bridge_queue, ^{
+            if ([context[@"released"] boolValue]) return;
+            if (!certificate) { http_json(connection, 409, result); return; }
+            if (!write_private_file(certificate_path(), certificate)) {
+                http_json(connection, 500, @{@"error": @"certificate_write_failed"});
+                return;
+            }
+            publish_preferences();
+            http_json(connection, 200, result);
+        });
+    });
 }
 
 // Returns YES when the request is complete and has been answered.
@@ -1842,7 +1870,7 @@ static BOOL http_request(nw_connection_t connection, NSMutableDictionary *contex
         else http_json(connection, 404, @{@"error": @"device_certificate_unavailable"});
     } else if ([path isEqual:@"/v1/certificate"] && [method isEqual:@"POST"]) {
         if (!bridge_available) http_json(connection, 409, service_report());
-        else certificate_route(connection, body);
+        else certificate_route(connection, context, body);
     } else if ([path isEqual:@"/v1/session"] && [method isEqual:@"GET"]) {
         open_websocket(connection, context, headers, query);
         if ([context[@"mode"] isEqual:@"websocket"]) websocket_frames(connection, context);

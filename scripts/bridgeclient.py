@@ -151,19 +151,20 @@ def open_socket(config, token, timeout):
         code = 'bridge_refused' if isinstance(error, ConnectionRefusedError) else 'bridge_unreachable'
         raise BridgeError('Cannot reach the bridge service: ' + str(error), code) from error
     raw.settimeout(timeout)
+    stream = None
     try:
         stream = context.wrap_socket(raw, server_hostname=None, do_handshake_on_connect=False)
         stream.do_handshake()
         return stream
     except socket.timeout as error:
-        raw.close()
+        (stream or raw).close()
         raise BridgeError('The bridge did not finish the secure handshake', 'bridge_unreachable') from error
     except ssl.SSLError as error:
-        raw.close()
+        (stream or raw).close()
         raise BridgeError('The bridge rejected the pairing token. Pair again with the token shown in the phone’s Settings',
                           'bridge_token_rejected') from error
     except OSError as error:
-        raw.close()
+        (stream or raw).close()
         raise BridgeError('The bridge closed the secure handshake: ' + str(error), 'bridge_unreachable') from error
 
 
@@ -203,10 +204,12 @@ def _read_head(stream, buffer, deadline):
             raise BridgeClosed('Bridge closed the connection before replying')
         buffer.extend(chunk)
     end = buffer.index(b'\r\n\r\n')
+    if end > MAX_HEADER:
+        raise BridgeError('Bridge response headers are too large', 'bridge_protocol_error')
     lines = bytes(buffer[:end]).decode('latin-1').split('\r\n')
     del buffer[:end + 4]
     parts = lines[0].split(' ', 2)
-    if len(parts) < 2 or parts[0] != 'HTTP/1.1' or not parts[1].isdigit():
+    if len(parts) < 2 or parts[0] != 'HTTP/1.1' or not (parts[1].isascii() and parts[1].isdigit()):
         raise BridgeError('Bridge returned an invalid HTTP response', 'bridge_protocol_error')
     headers = {}
     for line in lines[1:]:
@@ -230,7 +233,7 @@ def request(config, token, method, path, payload=None, *, timeout=None):
         buffer = bytearray()
         status, headers = _read_head(stream, buffer, deadline)
         length = headers.get('content-length', '')
-        if not length.isdigit() or int(length) > MAX_BODY:
+        if not (length.isascii() and length.isdigit()) or int(length) > MAX_BODY:
             raise BridgeError('Bridge response has an invalid length', 'bridge_protocol_error')
         while len(buffer) < int(length):
             chunk = _receive(stream, deadline)
@@ -385,16 +388,19 @@ class WebSocket:
             while (frame := self._parse()) is not None:
                 if self._handle(frame, time.monotonic() + 1) is not None:
                     raise BridgeError('Bridge sent an unexpected message', 'bridge_protocol_error')
-        except BridgeError:
+        except (BridgeError, OSError):
             self.closed = True
             return True
         return False
 
     def interrupt(self):
-        """Wake an in-flight read without closing its descriptor underneath it."""
+        """Wake an in-flight read without clearing SSLSocket._sslobj or closing the fd."""
         self.closed = True
         try:
-            self.stream.shutdown(socket.SHUT_RDWR)
+            if isinstance(self.stream, socket.socket):
+                socket.socket.shutdown(self.stream, socket.SHUT_RDWR)
+            else:
+                self.stream.shutdown(socket.SHUT_RDWR)
         except OSError:
             pass
 

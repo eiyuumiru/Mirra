@@ -16,11 +16,14 @@
 //! removes the local copies and starts support again. The next connection
 //! then creates new keys and the iPhone asks for its passcode to pair again.
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::time::Duration;
 
+use mirra_bridge::bridgeclient::{read_token, request};
 use mirra_bridge::transport::{Endpoint, EndpointOptions};
 use mirra_core::config::Config;
+use mirra_core::subprocess::RunOptions;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use crate::control::ControlEnv;
 use crate::error::{Error, Result};
@@ -70,7 +73,28 @@ pub fn restore_sharingd() -> Result<()> {
 
 /// Ask the bridge to drop this Mac's saved keys, sessions and record.
 pub fn forget_bridge(config: &Config) -> Result<()> {
-    let endpoint = Endpoint::open(config, EndpointOptions { saved: true, ..Default::default() })?;
+    let token = read_token(&config.token_file)?;
+    // Use the bridge's current authenticated certificate digest when available,
+    // so reset still works after a certificate rotation without updating the
+    // enrolled certificate file on disk.
+    let expected_certificate_sha256 = match request(config, &token, "GET", "/v1/certificate", None, None) {
+        Ok(response) if response.status == 200 && !response.body.is_empty() => {
+            let digest = Sha256::digest(&response.body);
+            let mut hex = String::with_capacity(digest.len() * 2);
+            for byte in digest {
+                use std::fmt::Write;
+                let _ = write!(&mut hex, "{:02x}", byte);
+            }
+            Some(hex)
+        }
+        _ => None,
+    };
+    let endpoint = Endpoint::open(config, EndpointOptions {
+        saved: true,
+        token: Some(token),
+        expected_certificate_sha256,
+        ..Default::default()
+    })?;
     let reply = endpoint.call("forget", json!({}))?;
     if reply.get("status") == Some(&json!(0)) && reply.get("forgotten") == Some(&Value::Bool(true)) {
         return Ok(());
@@ -92,10 +116,11 @@ pub fn delete_attested_keys(security: &mut dyn FnMut() -> std::io::Result<i32>) 
 }
 
 fn security_delete() -> std::io::Result<i32> {
-    let output = Command::new("/usr/bin/security")
-        .args(["delete-generic-password", "-a", ATTESTED_ACCOUNT])
-        .output()?;
-    Ok(output.status.code().unwrap_or(-1))
+    let output = mirra_core::subprocess::run(
+        &["/usr/bin/security", "delete-generic-password", "-a", ATTESTED_ACCOUNT],
+        &RunOptions::new().capture().timeout(Duration::from_secs(15)),
+    ).map_err(|error| std::io::Error::other(error.to_string()))?;
+    Ok(output.code)
 }
 
 /// Remove the local copies: keychain key, Mirra's backups, AutoUnlock entries.
@@ -109,7 +134,7 @@ pub fn forget_local_pairing(home: &Path) -> Result<Value> {
             Err(error) => return Err(error.into()),
         }
     }
-    let pairings = mirra_keystore::sharingd::forget_pairing()?;
+    let pairings = mirra_keystore::sharingd::forget_pairing_in(&home.join("Library/Sharing/AutoUnlock"))?;
     Ok(json!({"keychain_items": keychain, "backup_files": files, "pairing_entries": pairings}))
 }
 

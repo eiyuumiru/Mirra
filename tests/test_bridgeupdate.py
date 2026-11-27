@@ -5,7 +5,7 @@ import plistlib
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from bridgeclient import BRIDGE_REVISION, BridgeTimeout, bridge_revision
@@ -125,3 +125,25 @@ class BridgeUpdateTests(unittest.TestCase):
         ]) as query, patch('bridgeupdate.time.sleep'):
             confirm_revision(self.config, self.token)
         self.assertEqual(query.call_count, 3)
+
+    def test_sudo_auth_failure_does_not_attempt_rollback_or_strand_stage(self):
+        access = Mock(user='root')
+        access.run.side_effect = RemoteSetupError('Wrong sudo password', 'sudo_password_rejected')
+        def run_remote(_config, command, _input=None):
+            if command[0] == 'cat':
+                return self.daemon if command[1].endswith('.plist') else (self.token + '\n').encode()
+            return b''
+        with patch('bridgeupdate.wait_for_service', return_value=status(1)), \
+                patch('bridgeupdate.has_ssh_access', return_value=True), \
+                patch('bridgeupdate.bridge_environment', return_value={'path_mode': 'native', 'rootless': False}), \
+                patch('bridgeupdate.RootAccess', return_value=access), \
+                patch('bridgeupdate.remote', side_effect=run_remote) as remote, \
+                patch('bridgeupdate.require_ios_endpoint'), \
+                patch('bridgeupdate.signing_tool', return_value='ldid'), \
+                patch('bridgeupdate.remote_helper', return_value=json.dumps({
+                    'bridge_revision': BRIDGE_REVISION, 'required_symbols_available': True})):
+            with self.assertRaises(RemoteSetupError) as caught:
+                update_bridge(self.config, self.token, self.source, None)
+        self.assertEqual(caught.exception.code, 'sudo_password_rejected')
+        self.assertEqual(access.run.call_count, 1)
+        self.assertIn('rm', [call.args[1][0] for call in remote.call_args_list])

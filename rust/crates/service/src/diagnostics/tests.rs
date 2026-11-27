@@ -263,3 +263,15 @@ fn iso_timestamps_follow_python_fromisoformat() {
     assert!(iso_timestamp("2026-11-08 04:00:00").is_some());
     assert_eq!(iso_timestamp("not a date"), None);
 }
+
+#[test]
+fn native_dated_logs_are_collected_and_unicode_digits_do_not_panic() {
+    let f = Fixture::new();
+    let today = mirra_core::logfiles::today();
+    let dated = format!("logs/native-{}.log", today.format("%Y-%m-%d"));
+    f.file(&dated, b"{\"source\":\"Mirroring\",\"message\":\"stream event observed\"}\n");
+    f.file("logs/setup-\u{0968}\u{0966}\u{0968}\u{096c}-\u{0967}\u{0967}-\u{0966}\u{096e}.log", b"ignored\n");
+    let result = f.collect(&json!({}));
+    assert_eq!(result["ok"], true);
+    assert!(messages(&result).iter().any(|m| m.contains("stream event observed")));
+}

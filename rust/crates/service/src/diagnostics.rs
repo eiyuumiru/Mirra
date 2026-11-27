@@ -355,10 +355,10 @@ pub fn default_base() -> PathBuf {
     util::home().join("Library/Application Support/Mirra")
 }
 
-static DATED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\A(?:setup|control)-\d{4}-\d{2}-\d{2}\.log\z").unwrap());
+static DATED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\A(?:setup|control|native)-[0-9]{4}-[0-9]{2}-[0-9]{2}\.log\z").unwrap());
 static RUN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\Anative-[0-9]{8}-[0-9]{6}(?:-[0-9]+)?\z").unwrap());
-static ATTEMPT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\Abackend-\d{6}\z").unwrap());
-static KDEBUG: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\A(?:broker|controller)-kdebug-\d{8}-\d{6}\.log\z").unwrap());
+static ATTEMPT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\Abackend-[0-9]{6}\z").unwrap());
+static KDEBUG: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\A(?:broker|controller)-kdebug-[0-9]{8}-[0-9]{6}\.log\z").unwrap());
 static SETUP_ID: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\A[0-9a-f]{32}\z").unwrap());
 
 struct Collection<'a> {
@@ -419,13 +419,14 @@ fn collect_on(base: Option<&Path>, cursor: &Value, today: NaiveDate) -> Value {
     };
     let mut c = Collection { reader: &reader, now: now.clone(), previous_states, states: Map::new(), state_entries: Vec::new() };
     let mut files: Vec<(String, &str)> = [("logs/setup.log", "Setup"), ("logs/control.log", "Service"), ("logs/service.log", "Service"),
-        ("logs/sharingd.log", "Keys")].iter().map(|(n, t)| (n.to_string(), *t)).collect();
-    match reader.names("logs", &DATED, 2 * RETENTION_DAYS as usize) {
+        ("logs/native.log", "Native"), ("logs/sharingd.log", "Keys")].iter().map(|(n, t)| (n.to_string(), *t)).collect();
+    match reader.names("logs", &DATED, 3 * RETENTION_DAYS as usize) {
         Ok(names) => {
             for name in names {
-                let Ok(day) = NaiveDate::parse_from_str(&name[name.len() - 14..name.len() - 4], "%Y-%m-%d") else { continue };
+                let Some(stamp) = name.strip_suffix(".log").and_then(|s| s.get(s.len().saturating_sub(10)..)) else { continue };
+                let Ok(day) = NaiveDate::parse_from_str(stamp, "%Y-%m-%d") else { continue };
                 if today - TimeDelta::days(RETENTION_DAYS) < day && day <= today {
-                    let title = if name.starts_with("setup-") { "Setup" } else { "Service" };
+                    let title = if name.starts_with("setup-") { "Setup" } else if name.starts_with("native-") { "Native" } else { "Service" };
                     files.push((format!("logs/{}", name), title));
                 }
             }

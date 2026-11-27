@@ -141,28 +141,39 @@ struct SupportClient {
                                                    input: Data? = nil, environment: [String: String]? = nil) async throws -> Reply {
         // Setup sends only small JSON requests. Drain stdout before waiting for
         // exit so larger diagnostic replies cannot fill the pipe and block.
-        try await Task.detached(priority: .userInitiated) {
-            let task = try process(bundle, command, arguments: arguments)
-            let output = Pipe()
-            let stdin = Pipe()
-            task.standardOutput = output
-            task.standardInput = stdin
-            if let environment {
-                task.environment = ProcessInfo.processInfo.environment.merging(environment) { _, selected in selected }
+        let task = try process(bundle, command, arguments: arguments)
+        let output = Pipe()
+        let stdin = Pipe()
+        task.standardOutput = output
+        task.standardInput = stdin
+        if let environment {
+            task.environment = ProcessInfo.processInfo.environment.merging(environment) { _, selected in selected }
+        }
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    do {
+                        try task.run()
+                        defer { task.waitUntilExit() }
+                        do {
+                            if let input { try stdin.fileHandleForWriting.write(contentsOf: input) }
+                        } catch {
+                            try? stdin.fileHandleForWriting.close()
+                            if task.isRunning { task.terminate() }
+                            throw error
+                        }
+                        try? stdin.fileHandleForWriting.close()
+                        let data = try output.fileHandleForReading.readToEnd() ?? Data()
+                        let decoder = JSONDecoder()
+                        decoder.keyDecodingStrategy = .convertFromSnakeCase
+                        continuation.resume(returning: try decoder.decode(Reply.self, from: data))
+                    } catch {
+                        continuation.resume(throwing: error)
+                    }
+                }
             }
-            try task.run()
-            defer { task.waitUntilExit() }
-            do {
-                if let input { try stdin.fileHandleForWriting.write(contentsOf: input) }
-            } catch {
-                try? stdin.fileHandleForWriting.close()
-                throw error
-            }
-            try stdin.fileHandleForWriting.close()
-            let data = output.fileHandleForReading.readDataToEndOfFile()
-            let decoder = JSONDecoder()
-            decoder.keyDecodingStrategy = .convertFromSnakeCase
-            return try decoder.decode(Reply.self, from: data)
-        }.value
+        } onCancel: {
+            if task.isRunning { task.terminate() }
+        }
     }
 }

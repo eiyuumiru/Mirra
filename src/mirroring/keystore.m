@@ -202,6 +202,7 @@ static BOOL transfer(int fd, void *buffer, size_t count, BOOL writing) {
     uint8_t *position = buffer;
     while (count) {
         ssize_t size = writing ? send(fd, position, count, 0) : recv(fd, position, count, 0);
+        if (size < 0 && errno == EINTR) continue;
         if (size <= 0) return NO;
         position += size;
         count -= (size_t)size;
@@ -221,10 +222,12 @@ static void refresh_broker(void) {
         if ([value isKindOfClass:NSDictionary.class]) {
             NSDictionary *broker = value;
             if ([broker[@"socket"] isKindOfClass:NSString.class]) broker_socket = [broker[@"socket"] copy];
-            if ([broker[@"token"] isKindOfClass:NSString.class]) broker_token = [broker[@"token"] copy];
+            broker_token = [broker[@"token"] isKindOfClass:NSString.class] ? [broker[@"token"] copy] : nil;
             if ([broker[@"tcp_port"] isKindOfClass:NSNumber.class]) {
                 long port = [broker[@"tcp_port"] longValue];
                 broker_port = port > 0 && port <= 65535 ? (unsigned short)port : 0;
+            } else {
+                broker_port = 0;
             }
             if ([broker[@"certificate"] isKindOfClass:NSString.class]) {
                 NSData *certificate = [[NSData alloc] initWithBase64EncodedString:broker[@"certificate"] options:0];
@@ -257,7 +260,7 @@ static NSDictionary *rpc(NSDictionary *request) {
     unsigned short port = broker_port;
     BOOL online = broker_online;
     [broker_lock unlock];
-    if (!online || !socket_path || socket_path.length >= sizeof(((struct sockaddr_un *)0)->sun_path)) return nil;
+    if (!online || !socket_path || strlen(socket_path.fileSystemRepresentation) >= sizeof(((struct sockaddr_un *)0)->sun_path)) return nil;
     BOOL tcp = port && token.length;
     int fd = socket(tcp ? AF_INET : AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) return nil;
@@ -497,7 +500,8 @@ static int mirra_state(int bag, const void *remote, size_t remote_size, void *st
         [remote_keys addObject:encoded(remote, remote_size)];
         [keys_lock unlock];
     }
-    NSData *data = [[NSData alloc] initWithBase64EncodedString:response[@"data"] ?: @"" options:0];
+    NSData *data = [response[@"data"] isKindOfClass:NSString.class]
+        ? [[NSData alloc] initWithBase64EncodedString:response[@"data"] options:0] : nil;
     if (state && data.length == 104) memcpy(state, data.bytes, 104);
     if (status(response) == 0 && data.length == 104) {
         [keys_lock lock];
@@ -509,7 +513,15 @@ static int mirra_state(int bag, const void *remote, size_t remote_size, void *st
 
 static int mirra_drop(int bag, const void *remote, size_t remote_size) {
     if (!owns(remote_keys, remote, remote_size)) return aks_remote_peer_drop(bag, remote, remote_size);
-    return status(rpc(@{@"operation": @"drop", @"data": encoded(remote, remote_size)}));
+    NSString *key = encoded(remote, remote_size);
+    int value = status(rpc(@{@"operation": @"drop", @"data": key}));
+    if (value == 0) {
+        [keys_lock lock];
+        [remote_keys removeObject:key];
+        [remote_states removeObjectForKey:key];
+        [keys_lock unlock];
+    }
+    return value;
 }
 
 DYLD_INTERPOSE(mirra_copy_dcrt, MAECopyDCRTMacOSWithError)
@@ -623,10 +635,19 @@ static void restore_attested_ltk(void) {
     fprintf(stderr, "MIRRA_KEYSTORE attested_ltk restored status=%d\n", (int)status);
 }
 
+static dispatch_queue_t attested_backup_queue(void) {
+    static dispatch_once_t once;
+    static dispatch_queue_t queue;
+    dispatch_once(&once, ^{
+        queue = dispatch_queue_create("com.mirra.keystore.attested-backup", DISPATCH_QUEUE_SERIAL);
+    });
+    return queue;
+}
+
 static void schedule_attested_backup(void) {
     // Runs after sharingd's own write completes and outside its keychain call.
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(NSEC_PER_SEC / 2)),
-                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ backup_attested_ltk(); });
+                   attested_backup_queue(), ^{ backup_attested_ltk(); });
 }
 
 static OSStatus mirra_item_add(CFDictionaryRef attributes, CFTypeRef *result) {
@@ -650,7 +671,7 @@ __attribute__((constructor)) static void loaded(void) {
     if (attested_backup_path) {
         // Also covers a key written through an API other than SecItemAdd/Update.
         static dispatch_source_t timer;
-        timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+        timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, attested_backup_queue());
         dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC), 10 * NSEC_PER_SEC, 2 * NSEC_PER_SEC);
         dispatch_source_set_event_handler(timer, ^{ backup_attested_ltk(); });
         dispatch_resume(timer);
@@ -710,5 +731,7 @@ __attribute__((constructor)) static void loaded(void) {
             method_setImplementation(getter,replacement);
         }
     }
-    fprintf(stderr, "MIRRA_KEYSTORE_SHIM_LOADED pid=%d enabled=%d\n", getpid(), broker_path != nil);
+    if (broker_path) {
+        fprintf(stderr, "MIRRA_KEYSTORE_SHIM_LOADED pid=%d enabled=1\n", getpid());
+    }
 }

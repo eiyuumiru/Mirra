@@ -25,7 +25,7 @@ pub const PROTOCOL_VERSION: i64 = 2;
 pub const TRANSPORT_ERRORS: [&str; 8] = ["endpoint_reply_timeout", "endpoint_write_timeout", "endpoint_eof",
     "endpoint_disconnected", "endpoint_unavailable", "endpoint_invalid_reply", "endpoint_reply_too_large",
     "endpoint_io_error"];
-pub const ENDPOINT_OPERATIONS: [&str; 13] = ["generate", "validate", "sign_remote", "session_signed", "step",
+pub const ENDPOINT_OPERATIONS: [&str; 14] = ["generate", "identities", "validate", "sign_remote", "session_signed", "step",
     "token", "confirm", "setup", "reset", "get_state", "drop", "exit", "forget"];
 pub const GREETING_ERRORS: [&str; 3] = ["required_keystore_symbols_unavailable", "keystore_library_unavailable",
     "device_certificate_unavailable"];
@@ -137,7 +137,7 @@ impl Endpoint {
             }
             other => other,
         })?;
-        *lock(&self.interrupt) = socket.raw_socket().try_clone().ok();
+        *lock(&self.interrupt) = Some(socket.raw_socket().try_clone().map_err(mirra_core::Error::Os)?);
         let socket = self.socket.get_mut().unwrap_or_else(|e| e.into_inner()).insert(socket);
         let ready = read_from(socket, Instant::now() + timeout)?;
         self.ready = ready;
@@ -276,7 +276,7 @@ impl Endpoint {
     pub fn close(&self) {
         {
             let mut state = lock(&self.state);
-            if state.closed {
+            if state.closed || state.closing {
                 return;
             }
             state.closing = true;
@@ -294,6 +294,9 @@ impl Endpoint {
         };
         let failed = {
             let mut state = lock(&self.state);
+            if state.closed {
+                return;
+            }
             state.timeout = state.timeout.min(Duration::from_secs(2));
             state.failed
         };
@@ -301,7 +304,9 @@ impl Endpoint {
             if !failed && !socket.as_ref().unwrap().is_closed() {
                 let _ = self.call_locked(&mut socket, "exit", Value::Null, None);
             }
-            socket.as_mut().unwrap().close(None);
+            if let Some(mut ws) = socket.take() {
+                ws.close(None);
+            }
         }
         lock(&self.interrupt).take();
         lock(&self.state).closed = true;

@@ -197,9 +197,13 @@ impl BindHelper {
             while !header.is_null() {
                 if (*header).cmsg_level == libc::SOL_SOCKET && (*header).cmsg_type == libc::SCM_RIGHTS {
                     let data = libc::CMSG_DATA(header);
-                    let length = (*header).cmsg_len as usize - (data as usize - header as usize);
+                    let length = ((*header).cmsg_len as usize).saturating_sub(data as usize - header as usize);
                     for i in 0..length / std::mem::size_of::<libc::c_int>() {
-                        descriptors.push(std::ptr::read_unaligned(data.cast::<libc::c_int>().add(i)));
+                        let received_fd = std::ptr::read_unaligned(data.cast::<libc::c_int>().add(i));
+                        if received_fd >= 0 {
+                            let _ = libc::fcntl(received_fd, libc::F_SETFD, libc::FD_CLOEXEC);
+                        }
+                        descriptors.push(received_fd);
                     }
                 }
                 header = libc::CMSG_NXTHDR(&message, header);

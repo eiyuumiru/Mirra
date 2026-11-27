@@ -365,7 +365,7 @@ pub fn handshake(context: &SslContext, raw: RawSocket) -> Result<TlsStream> {
         Err(HandshakeError::Failure(mid)) => {
             let error = mid.error();
             match error.io_error() {
-                Some(io) if pyutil::is_timeout(io) && io.raw_os_error() != Some(libc::ETIMEDOUT) => Err(unfinished().into()),
+                Some(io) if pyutil::is_timeout(io) => Err(unfinished().into()),
                 Some(io) if error.code() == ErrorCode::SYSCALL => {
                     let text = match io.raw_os_error() {
                         Some(n) => mirra_core::Error::Os(io::Error::from_raw_os_error(n)).to_string(),
@@ -393,10 +393,10 @@ fn ssl_io(error: openssl::ssl::Error) -> Error {
 
 /// `_receive(stream, deadline)`: one read of up to 64 KiB; empty at EOF.
 fn receive(stream: &mut TlsStream, deadline: Instant) -> Result<Vec<u8>> {
-    let Some(left) = remaining(deadline) else { return Err(BridgeError::timeout().into()) };
-    stream.get_ref().set_timeout(Some(left))?;
     let mut buffer = vec![0u8; 65536];
     loop {
+        let Some(left) = remaining(deadline) else { return Err(BridgeError::timeout().into()) };
+        stream.get_ref().set_timeout(Some(left))?;
         match stream.ssl_read(&mut buffer) {
             Ok(n) => {
                 buffer.truncate(n);
@@ -404,8 +404,8 @@ fn receive(stream: &mut TlsStream, deadline: Instant) -> Result<Vec<u8>> {
             }
             Err(e) if e.code() == ErrorCode::ZERO_RETURN => return Ok(Vec::new()),
             Err(e) if e.code() == ErrorCode::SYSCALL && e.io_error().is_none() => return Ok(Vec::new()),
-            Err(e) if e.code() == ErrorCode::WANT_READ && e.io_error().is_none() => {}
-            Err(e) if e.io_error().is_some_and(|io| pyutil::is_timeout(io) && io.raw_os_error() != Some(libc::ETIMEDOUT)) => {
+            Err(e) if matches!(e.code(), ErrorCode::WANT_READ | ErrorCode::WANT_WRITE) && e.io_error().is_none() => {}
+            Err(e) if e.io_error().is_some_and(pyutil::is_timeout) => {
                 return Err(BridgeError::timeout().into());
             }
             Err(e) if e.io_error().is_some_and(|io| io.kind() == io::ErrorKind::Interrupted) => {}
@@ -423,8 +423,8 @@ fn send(stream: &mut TlsStream, data: &[u8], deadline: Instant) -> Result<()> {
         stream.get_ref().set_timeout(Some(left))?;
         match stream.ssl_write(view) {
             Ok(count) => view = &view[count..],
-            Err(e) if e.code() == ErrorCode::WANT_READ && e.io_error().is_none() => {}
-            Err(e) if e.io_error().is_some_and(|io| pyutil::is_timeout(io) && io.raw_os_error() != Some(libc::ETIMEDOUT)) => {
+            Err(e) if matches!(e.code(), ErrorCode::WANT_READ | ErrorCode::WANT_WRITE) && e.io_error().is_none() => {}
+            Err(e) if e.io_error().is_some_and(pyutil::is_timeout) => {
                 return Err(late().into());
             }
             Err(e) if e.io_error().is_some_and(|io| io.kind() == io::ErrorKind::Interrupted) => {}
@@ -462,6 +462,9 @@ fn read_head(stream: &mut TlsStream, buffer: &mut Vec<u8>, deadline: Instant) ->
         buffer.extend_from_slice(&chunk);
     }
     let end = find(buffer, b"\r\n\r\n").unwrap();
+    if end > MAX_HEADER {
+        return Err(protocol("Bridge response headers are too large"));
+    }
     let head: String = buffer[..end].iter().map(|b| *b as char).collect();
     buffer.drain(..end + 4);
     let lines: Vec<&str> = head.split("\r\n").collect();
@@ -715,8 +718,15 @@ impl WebSocket {
                 buffer.truncate(n);
                 buffer
             }
-            Err(e) if e.code() == ErrorCode::WANT_READ => return restored.is_err(),
-            Err(e) if e.io_error().is_some_and(|io| io.kind() == io::ErrorKind::WouldBlock) => return restored.is_err(),
+            Err(e) if e.code() == ErrorCode::WANT_READ
+                || e.io_error().is_some_and(|io| io.kind() == io::ErrorKind::WouldBlock) =>
+            {
+                if restored.is_err() {
+                    self.closed = true;
+                    return true;
+                }
+                return false;
+            }
             Err(e) if e.code() == ErrorCode::ZERO_RETURN || (e.code() == ErrorCode::SYSCALL && e.io_error().is_none()) => Vec::new(),
             Err(_) => {
                 self.closed = true;

@@ -166,6 +166,9 @@ pub fn write(fd: RawFd, data: &[u8]) -> io::Result<usize> {
 pub fn write_all(fd: RawFd, mut data: &[u8]) -> io::Result<()> {
     while !data.is_empty() {
         let n = write(fd, data)?;
+        if n == 0 {
+            return Err(io::Error::new(io::ErrorKind::WriteZero, "failed to write whole buffer"));
+        }
         data = &data[n..];
     }
     Ok(())

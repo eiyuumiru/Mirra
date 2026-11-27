@@ -97,6 +97,7 @@ pub struct NativeLaunchAgent {
     pub plist: PathBuf,
     pub log: PathBuf,
     pub changed: bool,
+    pub restored: Option<State>,
     pub lock: Option<File>,
     pub journal: LaunchOwnerJournal,
     pub journal_owned: bool,
@@ -128,6 +129,7 @@ impl NativeLaunchAgent {
             plist: directory.join("native-launch-agent.plist"),
             log: directory.join("native-launch-agent.stderr.log"),
             changed: false,
+            restored: None,
             lock: None,
             journal,
             journal_owned: false,
@@ -235,10 +237,11 @@ impl NativeLaunchAgent {
     /// Replace Apple's agent with the adapter-injected copy; on any failure the
     /// original is restored before the error is returned.
     pub fn start(&mut self) -> Result<State> {
+        self.restored = None;
         match self.start_inner() {
             Ok(state) => Ok(state),
             Err(error) => {
-                self.close()?;
+                self.restored = self.close()?;
                 Err(error)
             }
         }
@@ -328,7 +331,7 @@ impl NativeLaunchAgent {
             }
         }
         if !self.changed {
-            return Ok(None);
+            return Ok(self.restored.take());
         }
         let plist_path = util::text(&self.plist);
         let original = util::text(&self.context.original);

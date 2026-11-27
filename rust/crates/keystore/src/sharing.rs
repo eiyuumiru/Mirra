@@ -256,6 +256,12 @@ pub fn run(options: SharingOptions) -> Result<(), Failure> {
     let broker_file = state_directory.join("broker.json");
     // A detached sharingd outlives this workspace, so its output goes to a stable file.
     let logs = options.logs_directory();
+    std::fs::create_dir_all(&logs).map_err(|e| Error::with_path(e, &logs))?;
+    util::chmod(&logs, 0o700)?;
+    let logs_info = sys::lstat(&logs).map_err(|e| Error::with_path(e, &logs))?;
+    if !sys::private_owned(&logs_info, true) {
+        return Err(Failure::exit("Mirra log directory must be private"));
+    }
     let sharingd_logs = [(1, logs.join("sharingd.stdout.log")), (2, logs.join("sharingd.log"))];
     let settings = json!({
         "attested_ltk_backup": text(&state_directory.join("attested-ltk.plist")),
@@ -300,7 +306,7 @@ pub fn run(options: SharingOptions) -> Result<(), Failure> {
                 (options.emit)(&json!({"BROKER_FILE_FAILED": failure_text(&error)}));
             }
             // Only a normal stop of the long-running service keeps the adapter.
-            let detach = stop.is_set() && options.duration.is_none() && !failed;
+            let detach = stop.is_set() && options.duration.is_none() && !failed && log_limits.error().is_none();
             let state = agent.close(detach)?;
             let key = if detach { "SHARINGD_DETACHED" } else { "ORIGINAL_RESTORED" };
             (options.emit)(&json!({key: state}));
@@ -365,7 +371,9 @@ impl Session<'_> {
             agent.record_injected(pid)?;
             state
         };
-        let pid: i32 = py_str(state.get("pid")).trim().parse().unwrap_or(0);
+        let pid_text = py_str(state.get("pid"));
+        let pid: i32 = util::strip(&pid_text).parse().ok().filter(|p| *p > 0).ok_or_else(|| Failure::raised("ValueError",
+            format!("invalid literal for int() with base 10: {}", mirra_core::pyfmt::repr_str(&pid_text))))?;
         for (fd, path) in self.sharingd_logs {
             (options.watch_native)(log_limits, path, pid, *fd)?;
         }

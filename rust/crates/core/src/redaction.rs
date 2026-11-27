@@ -35,8 +35,11 @@ static PEM: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?s)-----BEGIN [^-\r\n]+-----.*?(?:-----END [^-\r\n]+-----|\z)").unwrap()
 });
 static ASSIGNMENT: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(concat!(r"(?i)(\b(?:password|passphrase|_auth|auth_token|token|private_key|ltk|local_ltk|remote_ltk|signature|ciphertext)\b\s*[=:]\s*)",
+    Regex::new(concat!(r"(?i)(\b(?:[a-z0-9_]*token|password|passphrase|_auth|private_key|ltk|local_ltk|remote_ltk|signature|ciphertext)\b\s*[=:]\s*)",
         r#"(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;}]+)"#)).unwrap()
+});
+static BEARER: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(authorization\s*:\s*bearer\s+)\S+").unwrap()
 });
 static HEX_LITERAL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b0x[0-9a-fA-F]{32,}\b").unwrap());
 static ANSI: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\x1b\[[0-?]*[ -/]*[@-~]").unwrap());
@@ -94,6 +97,7 @@ fn redact_blobs(text: &str) -> String {
 pub fn redact_text(text: &str) -> String {
     let text = ANSI.replace_all(text, "");
     let text = PEM.replace_all(&text, REDACTED);
+    let text = BEARER.replace_all(&text, |m: &Captures| format!("{}{}", &m[1], REDACTED));
     let text = ASSIGNMENT.replace_all(&text, |m: &Captures| format!("{}{}", &m[1], REDACTED));
     let text = HEX_LITERAL.replace_all(&text, REDACTED);
     let text = redact_blobs(&text);
@@ -181,6 +185,9 @@ mod tests {
         assert_eq!(redact_bytes(b"\xff\x00"), "<binary output: 2 bytes>");
         assert_eq!(redact_line(b"\xffnot json"), "<binary output: 9 bytes>");
         assert_eq!(redact_line(b"plain token: abc"), "plain token: <redacted>");
+        assert_eq!(redact_text("pairing_token=ABCDEFGHJKMNPQRSTVWXYZ12"), "pairing_token=<redacted>");
+        assert_eq!(redact_text("MIRRA_KEYSTORE_BROKER_TOKEN=secret123"), "MIRRA_KEYSTORE_BROKER_TOKEN=<redacted>");
+        assert_eq!(redact_text("Authorization: Bearer my-secret-token"), "Authorization: Bearer <redacted>");
     }
 
     #[test]

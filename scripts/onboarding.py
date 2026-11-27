@@ -373,6 +373,8 @@ class SetupWizard:
         _, _, ready = self.paths(identifier)
         self.host_check()
         config = load_config(ready)
+        # Validate replacement credentials before stopping any working support.
+        self.service.validate_saved_bridge(config)
         # The final UI action explicitly switches to this verified bridge.
         with activity.operation('Service', 'stop previous bridge'):
             self.service.stop()

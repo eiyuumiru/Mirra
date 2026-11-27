@@ -277,6 +277,9 @@ class NativeService:
             if not source.is_file():
                 raise RuntimeError('Build the native support adapters first; missing ' + name)
             subprocess.run(['codesign', '--verify', str(source)], capture_output=True, check=True, timeout=10)
+        for name in BRIDGE_UPDATE_FILES:
+            if not (self.source / name).is_file():
+                raise RuntimeError('Updated support is incomplete; missing ' + name)
         require_media_profile(self.source)
 
     @staticmethod
@@ -291,6 +294,8 @@ class NativeService:
             source = getattr(config, attribute)
             if not source.is_file() or not source.stat().st_size:
                 raise RuntimeError('Backend provisioning is incomplete: ' + attribute)
+        if not config.token_file.read_bytes().strip():
+            raise RuntimeError('Backend provisioning is incomplete: token_file')
 
     @classmethod
     def validate_saved_bridge(cls, config):
@@ -318,7 +323,8 @@ class NativeService:
             # Updating source must not reset a working bridge to repo defaults.
             config = load_config(self.package / 'config.json' if self.package.exists() else None)
         self.validate_source()
-        if using_saved and self.package.exists():
+        explicit_profile = config.source.is_file() and isinstance(json.loads(config.source.read_text()).get('backend'), dict)
+        if (using_saved and self.package.exists()) or explicit_profile:
             self.validate_saved_bridge(config)
         else:
             self.validate_credentials(config)
@@ -359,65 +365,69 @@ class NativeService:
                 if journal.exists():
                     raise RuntimeError('Finish native session cleanup before replacing the package')
         staging = Path(tempfile.mkdtemp(prefix='.package-', dir=self.base))
-        files = []
-        for source in sorted((self.source / 'scripts').glob('*.py')):
-            target = staging / 'scripts' / source.name
-            target.parent.mkdir(mode=0o700, exist_ok=True)
-            shutil.copyfile(source, target)
-            target.chmod(0o600)
-            files.append(target.relative_to(staging))
-        embedded = self.source / 'python'
-        if not embedded.exists() and (self.package / 'python').exists():
-            embedded = self.package / 'python'
-        if not embedded.exists():
-            embedded = self.source / 'build/Mirra.app/Contents/Resources/Support/python'
-        if not embedded.exists():
-            raise RuntimeError('Build Mirra.app before installing its background service')
-        files.extend(path.relative_to(staging) for path in copy_runtime(embedded, staging / 'python'))
-        for name in PACKAGE_ADAPTERS + SUPPORT_TOOLS:
-            target = staging / 'build' / name
-            target.parent.mkdir(mode=0o700, exist_ok=True)
-            shutil.copyfile(self.source / 'build' / name, target)
-            target.chmod(0o700)
-            files.append(target.relative_to(staging))
-        for name in BRIDGE_UPDATE_FILES:
-            target = staging / name
-            target.parent.mkdir(mode=0o700, exist_ok=True)
-            shutil.copyfile(self.source / name, target)
-            target.chmod(0o600)
-            files.append(target.relative_to(staging))
-        paths = {}
-        # The token and certificate are required at runtime. SSH access files
-        # are kept when present so a later setup can reuse the verified access.
-        for attribute, name, required in [('token_file', 'token', True), ('certificate_file', 'certificate.der', True),
-                                          ('user_file', 'user', False), ('identity_file', 'identity', False),
-                                          ('known_hosts_file', 'known_hosts', False)]:
-            source = getattr(config, attribute)
-            if not source.is_file() or not source.stat().st_size:
-                if not required:
-                    continue
-                raise RuntimeError('Backend provisioning is incomplete: ' + attribute)
-            target = staging / 'private' / name
-            target.parent.mkdir(mode=0o700, exist_ok=True)
-            shutil.copyfile(source, target)
-            target.chmod(0o600)
-            files.append(target.relative_to(staging))
-            paths[attribute] = self.package / 'private' / name
-        installed = replace(config, **paths, runtime_directory=self.package / 'runtime/host')
-        write_state(staging / 'config.json', installed.as_dict())
-        files.append(Path('config.json'))
-        manifest = {'schema_version': PACKAGE_SCHEMA, 'support_revision': SUPPORT_REVISION,
-            'product': 'Mirra', 'package': str(self.package),
-            'prepared_at': datetime.now().isoformat(), 'files': {
-                str(path): hashlib.sha256((staging / path).read_bytes()).hexdigest() for path in files}}
-        if previous_definition is not None:
-            manifest['previous_definition'] = previous_definition
-        write_state(staging / 'manifest.json', manifest)
-        subprocess.run([sys.executable, '-E', '-s', '-B', '-m', 'compileall', '-q', str(staging / 'scripts')], check=True, timeout=30)
-        if self.package.exists():
-            backup = self.base / ('previous-' + datetime.now().strftime('%Y%m%d-%H%M%S'))
-            self.package.rename(backup)
-        staging.rename(self.package)
+        try:
+            files = []
+            for source in sorted((self.source / 'scripts').glob('*.py')):
+                target = staging / 'scripts' / source.name
+                target.parent.mkdir(mode=0o700, exist_ok=True)
+                shutil.copyfile(source, target)
+                target.chmod(0o600)
+                files.append(target.relative_to(staging))
+            embedded = self.source / 'python'
+            if not embedded.exists() and (self.package / 'python').exists():
+                embedded = self.package / 'python'
+            if not embedded.exists():
+                embedded = self.source / 'build/Mirra.app/Contents/Resources/Support/python'
+            if not embedded.exists():
+                raise RuntimeError('Build Mirra.app before installing its background service')
+            files.extend(path.relative_to(staging) for path in copy_runtime(embedded, staging / 'python'))
+            for name in PACKAGE_ADAPTERS + SUPPORT_TOOLS:
+                target = staging / 'build' / name
+                target.parent.mkdir(mode=0o700, exist_ok=True)
+                shutil.copyfile(self.source / 'build' / name, target)
+                target.chmod(0o700)
+                files.append(target.relative_to(staging))
+            for name in BRIDGE_UPDATE_FILES:
+                target = staging / name
+                target.parent.mkdir(mode=0o700, exist_ok=True)
+                shutil.copyfile(self.source / name, target)
+                target.chmod(0o600)
+                files.append(target.relative_to(staging))
+            paths = {}
+            # The token and certificate are required at runtime. SSH access files
+            # are kept when present so a later setup can reuse the verified access.
+            for attribute, name, required in [('token_file', 'token', True), ('certificate_file', 'certificate.der', True),
+                                              ('user_file', 'user', False), ('identity_file', 'identity', False),
+                                              ('known_hosts_file', 'known_hosts', False)]:
+                source = getattr(config, attribute)
+                if not source.is_file() or not source.stat().st_size:
+                    if not required:
+                        continue
+                    raise RuntimeError('Backend provisioning is incomplete: ' + attribute)
+                target = staging / 'private' / name
+                target.parent.mkdir(mode=0o700, exist_ok=True)
+                shutil.copyfile(source, target)
+                target.chmod(0o600)
+                files.append(target.relative_to(staging))
+                paths[attribute] = self.package / 'private' / name
+            installed = replace(config, **paths, runtime_directory=self.package / 'runtime/host')
+            write_state(staging / 'config.json', installed.as_dict())
+            files.append(Path('config.json'))
+            manifest = {'schema_version': PACKAGE_SCHEMA, 'support_revision': SUPPORT_REVISION,
+                'product': 'Mirra', 'package': str(self.package),
+                'prepared_at': datetime.now().isoformat(), 'files': {
+                    str(path): hashlib.sha256((staging / path).read_bytes()).hexdigest() for path in files}}
+            if previous_definition is not None:
+                manifest['previous_definition'] = previous_definition
+            write_state(staging / 'manifest.json', manifest)
+            subprocess.run([sys.executable, '-E', '-s', '-B', '-m', 'compileall', '-q', str(staging / 'scripts')], check=True, timeout=30)
+            if self.package.exists():
+                backup = self.base / ('previous-' + datetime.now().strftime('%Y%m%d-%H%M%S'))
+                self.package.rename(backup)
+            staging.rename(self.package)
+        except BaseException:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
         (self.base / 'logs').mkdir(mode=0o700, exist_ok=True)
         if not self.log.exists():
             self.log.touch(mode=0o600)

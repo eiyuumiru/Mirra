@@ -366,11 +366,15 @@ class NativeServiceTests(unittest.TestCase):
         self.prepare()
         before = (self.service.package / 'manifest.json').read_bytes()
         for attribute in ('token_file', 'certificate_file'):
-            for exists in (False, True):
-                with self.subTest(attribute=attribute, empty=exists):
-                    candidate = self.root / (attribute + ('-empty' if exists else '-missing'))
-                    if exists:
+            for mode in ('missing', 'empty', 'whitespace'):
+                if attribute == 'certificate_file' and mode == 'whitespace':
+                    continue
+                with self.subTest(attribute=attribute, mode=mode):
+                    candidate = self.root / f'{attribute}-{mode}'
+                    if mode == 'empty':
                         candidate.touch()
+                    elif mode == 'whitespace':
+                        candidate.write_text('  \n\t ')
                     replacement = replace(self.config, **{attribute: candidate})
                     with patch.object(self.service, 'registration', return_value={}), \
                             patch('sharingd.SharingdAgent.restore_detached') as restore, \
@@ -381,6 +385,24 @@ class NativeServiceTests(unittest.TestCase):
                     self.assertEqual((self.service.package / 'manifest.json').read_bytes(), before)
                     self.assertEqual(list(self.service.base.glob('previous-*')), [])
                     self.assertEqual(list(self.service.base.glob('.package-*')), [])
+
+    def test_imported_ssh_era_profile_cannot_borrow_default_token(self):
+        self.prepare()
+        before = (self.service.package / 'manifest.json').read_bytes()
+        profile = self.root / 'ssh-era-ready.json'
+        saved = json.loads((self.service.package / 'config.json').read_text())
+        saved['backend'].pop('service')
+        write_state(profile, saved)
+        imported = load_config(profile, root=self.source)
+        self.assertTrue(imported.token_file.is_file())
+        with patch.object(self.service, 'registration', return_value={}), \
+                patch('sharingd.SharingdAgent.restore_detached') as restore, \
+                patch('installation.subprocess.run', return_value=subprocess.CompletedProcess([], 0)):
+            with self.assertRaisesRegex(RuntimeError, 'SSH-era installation'):
+                self.service.prepare(imported, replace_package=True)
+        restore.assert_not_called()
+        self.assertEqual((self.service.package / 'manifest.json').read_bytes(), before)
+        self.assertEqual(list(self.service.base.glob('previous-*')), [])
 
     def test_missing_saved_credentials_do_not_stop_or_replace_support(self):
         self.prepare()

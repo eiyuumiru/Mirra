@@ -211,8 +211,10 @@ fn check_bridge(env: &dyn Environment, config: &Config, renewal_state: &Path, on
                 return Err(CertificateError::new("invalid", "Certificate retry state is not a private Mirra file", None).into());
             }
             let text = std::fs::read(renewal_state).map_err(|e| mirra_core::Error::with_path(e, renewal_state))?;
-            let text = String::from_utf8(text).map_err(|e| Error::value(e.to_string()))?;
-            let state: Value = serde_json::from_str(&text).map_err(|e| Error::value(e.to_string()))?;
+            let text = String::from_utf8(text)
+                .map_err(|_| CertificateError::new("invalid", "Certificate retry state is invalid", None))?;
+            let state: Value = serde_json::from_str(&text)
+                .map_err(|_| CertificateError::new("invalid", "Certificate retry state is invalid", None))?;
             let Value::Object(state) = state else {
                 return Err(CertificateError::new("invalid", "Certificate retry state is invalid", None).into());
             };

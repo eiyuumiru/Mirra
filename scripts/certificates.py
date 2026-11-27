@@ -105,7 +105,10 @@ def _check_bridge(config, renewal_state, on_renewal, *, force):
     else:
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
             raise CertificateError('invalid', 'Certificate retry state is not a private Mirra file')
-        state = json.loads(renewal_state.read_text())
+        try:
+            state = json.loads(renewal_state.read_text())
+        except (ValueError, UnicodeError) as error:
+            raise CertificateError('invalid', 'Certificate retry state is invalid') from error
         if not isinstance(state, dict):
             raise CertificateError('invalid', 'Certificate retry state is invalid')
         retry_at = state.get('retry_at')

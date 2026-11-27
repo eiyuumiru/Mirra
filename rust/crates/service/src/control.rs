@@ -212,7 +212,12 @@ pub fn control(args: &ControlArgs, env: &dyn ControlEnv, write: &mut dyn FnMut(&
     activity::emit("Service", "request", "info", json!({"action": args.action}));
     let value = match act(&args.action, env) {
         Ok(value) => value,
-        Err(error) if error.is_delegate() => return delegate(args),
+        Err(error) if error.is_delegate() => {
+            if args.action == "reset" {
+                return ControlDispatch::DelegateToPython(vec!["start".into()]);
+            }
+            return delegate(args);
+        }
         // Exception messages can contain private paths/account information.
         // The separate CLI remains available for owner-local detailed diagnosis.
         Err(_) => json!({"ok": false, "message": FAILURE, "report": env.observe()}),

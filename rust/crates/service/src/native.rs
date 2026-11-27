@@ -352,6 +352,7 @@ impl Session<'_> {
             }
         }
         let listener = UnixListener::bind(&self.address).map_err(|e| mirra_core::Error::with_path(e, &self.address))?;
+        listener.set_nonblocking(true).map_err(|e| mirra_core::Error::with_path(e, &self.address))?;
         let listener = Arc::new(listener);
         self.listener = Some(listener.clone());
         util::chmod(&self.actual, 0o600)?;

@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 struct LogsView: View {
-    var hardware: [LogSnapshot.Entry]
+    @ObservedObject var model: MirraModel
     @AppStorage("VerboseLogs") private var verbose = false
     @State private var log = ""
     @State private var paused = false
@@ -44,6 +44,7 @@ struct LogsView: View {
                 do {
                     let snapshot = try await SupportClient.diagnostics()
                     guard !Task.isCancelled else { return }
+                    let hardware = model.hardwareEntries
                     let summary = hardware.isEmpty ? snapshot.entries :
                         hardware + snapshot.entries.filter { $0.source != "Host hardware" }
                     log = summary.reversed().map { entry in

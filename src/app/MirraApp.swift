@@ -10,6 +10,8 @@ final class MirraApplication: NSObject, NSApplicationDelegate, NSWindowDelegate 
     private var logInput: FileHandle?
     private var logVerbose = false
 
+    private var defaultsObserver: NSObjectProtocol?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.mainMenu = makeMenu()
 
@@ -26,8 +28,11 @@ final class MirraApplication: NSObject, NSApplicationDelegate, NSWindowDelegate 
         window.makeKeyAndOrderFront(nil)
         NSApp.activate()
 
-        NotificationCenter.default.addObserver(self, selector: #selector(startLogCapture),
-                                               name: UserDefaults.didChangeNotification, object: nil)
+        defaultsObserver = NotificationCenter.default.addObserver(
+            forName: UserDefaults.didChangeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.startLogCapture() }
+        }
         startLogCapture()
         Task {
             if let snapshot = try? await SupportClient.diagnostics(hardware: true) {
@@ -39,8 +44,7 @@ final class MirraApplication: NSObject, NSApplicationDelegate, NSWindowDelegate 
                 if NSApp.isActive || model.pendingConnect {
                     await model.refresh()
                 }
-                let warmingUp = model.report.state == "checking" || model.report.state == "starting"
-                try? await Task.sleep(for: .seconds(model.pendingConnect || warmingUp ? 2 : 15))
+                try? await Task.sleep(for: .seconds(model.pendingConnect || model.report.isTransitioning ? 2 : 15))
             }
         }
     }
@@ -94,6 +98,10 @@ final class MirraApplication: NSObject, NSApplicationDelegate, NSWindowDelegate 
 
     func applicationWillTerminate(_ notification: Notification) {
         poll?.cancel()
+        if let observer = defaultsObserver {
+            NotificationCenter.default.removeObserver(observer)
+            defaultsObserver = nil
+        }
         try? logInput?.close()
     }
 
@@ -143,6 +151,7 @@ final class MirraApplication: NSObject, NSApplicationDelegate, NSWindowDelegate 
 @main
 struct Mirra {
     static func main() {
+        signal(SIGPIPE, SIG_IGN)
         let app = NSApplication.shared
         let delegate = MirraApplication()
         app.delegate = delegate

@@ -399,15 +399,19 @@ fn binary(data: &[u8]) -> Result<Plist> {
         return Err(bad());
     }
     let offsets: Vec<usize> = (0..count).map(|i| be(&data[table + i * offset_size..table + (i + 1) * offset_size]) as usize).collect();
-    let mut reader = Binary { data, offsets, ref_size, active: Vec::new() };
+    let mut reader = Binary { data, offsets, ref_size, active: Vec::new(), nodes: 0 };
     reader.object(top)
 }
+
+const MAX_PLIST_DEPTH: usize = 64;
+const MAX_PLIST_NODES: usize = 100_000;
 
 struct Binary<'a> {
     data: &'a [u8],
     offsets: Vec<usize>,
     ref_size: usize,
     active: Vec<usize>,
+    nodes: usize,
 }
 
 impl Binary<'_> {
@@ -425,14 +429,20 @@ impl Binary<'_> {
             return Ok((nibble as usize, at + 1));
         }
         let marker = *self.bytes(at + 1, 1)?.first().unwrap();
-        if marker >> 4 != 1 {
+        if marker >> 4 != 1 || (marker & 0xF) > 3 {
             return Err(invalid("Invalid file"));
         }
         let size = 1usize << (marker & 0xF);
-        Ok((self.uint(at + 2, size)? as usize, at + 2 + size))
+        let value = usize::try_from(self.uint(at + 2, size)?).map_err(|_| invalid("Invalid file"))?;
+        let start = at.checked_add(2).and_then(|v| v.checked_add(size)).ok_or_else(|| invalid("Invalid file"))?;
+        Ok((value, start))
     }
 
     fn object(&mut self, reference: usize) -> Result<Plist> {
+        self.nodes = self.nodes.checked_add(1).ok_or_else(|| invalid("Invalid file"))?;
+        if self.nodes > MAX_PLIST_NODES || self.active.len() >= MAX_PLIST_DEPTH {
+            return Err(invalid("Invalid file"));
+        }
         let at = *self.offsets.get(reference).ok_or_else(|| invalid("Invalid file"))?;
         if self.active.contains(&reference) {
             return Err(invalid("Invalid file"));
@@ -446,6 +456,9 @@ impl Binary<'_> {
                 _ => return Err(invalid("Invalid file")),
             },
             0x1 => {
+                if nibble > 4 {
+                    return Err(invalid("Invalid file"));
+                }
                 let size = 1usize << nibble;
                 let raw = self.bytes(at + 1, size)?;
                 let value = match size {
@@ -463,7 +476,11 @@ impl Binary<'_> {
             },
             0x3 if marker == 0x33 => {
                 let seconds = f64::from_be_bytes(self.bytes(at + 1, 8)?.try_into().unwrap());
-                let epoch = chrono::DateTime::from_timestamp(978_307_200 + seconds.floor() as i64, 0)
+                if !seconds.is_finite() || seconds.abs() > 1.0e13 {
+                    return Err(invalid("Invalid file"));
+                }
+                let ts = 978_307_200i64.checked_add(seconds.floor() as i64).ok_or_else(|| invalid("Invalid file"))?;
+                let epoch = chrono::DateTime::from_timestamp(ts, 0)
                     .ok_or_else(|| invalid("Invalid file"))?;
                 Plist::Date(epoch.format("%Y-%m-%dT%H:%M:%SZ").to_string())
             }
@@ -481,14 +498,26 @@ impl Binary<'_> {
                 let units: Vec<u16> = raw.chunks(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
                 Plist::String(String::from_utf16(&units).map_err(|_| invalid("Invalid file"))?)
             }
-            0x8 => Plist::Uid(self.uint(at + 1, nibble as usize + 1)?),
+            0x8 => {
+                let size = nibble as usize + 1;
+                if size > 8 {
+                    return Err(invalid("Invalid file"));
+                }
+                Plist::Uid(self.uint(at + 1, size)?)
+            }
             0xA | 0xD => {
                 let (length, start) = self.length(at, nibble)?;
                 let width = self.ref_size;
-                let references = if kind == 0xD { length * 2 } else { length };
+                let references = if kind == 0xD {
+                    length.checked_mul(2).ok_or_else(|| invalid("Invalid file"))?
+                } else {
+                    length
+                };
+                let byte_len = references.checked_mul(width).ok_or_else(|| invalid("Invalid file"))?;
+                let raw = self.bytes(start, byte_len)?;
                 let mut refs = Vec::with_capacity(references);
-                for i in 0..references {
-                    refs.push(self.uint(start + i * width, width)? as usize);
+                for chunk in raw.chunks(width) {
+                    refs.push(chunk.iter().fold(0u64, |a, b| (a << 8) | *b as u64) as usize);
                 }
                 self.active.push(reference);
                 let result = if kind == 0xA {
@@ -627,6 +656,18 @@ mod tests {
         assert!(loads(b"<plist><array><string>x</array></plist>").is_err());
         let empty = loads(b"<?xml version=\"1.0\"?><plist version=\"1.0\"><array/></plist>").unwrap();
         assert_eq!(empty, Plist::Array(vec![]));
+        // Crafted binary plist with huge declared array length must fail without OOM.
+        let mut crafted = b"bplist00".to_vec();
+        crafted.extend_from_slice(&[0xAF, 0x13, 0x0F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
+        let table = crafted.len() as u64;
+        crafted.push(8); // offset of object 0
+        crafted.extend_from_slice(&[0u8; 6]);
+        crafted.push(1); // offset_size
+        crafted.push(1); // ref_size
+        crafted.extend_from_slice(&1u64.to_be_bytes()); // count
+        crafted.extend_from_slice(&0u64.to_be_bytes()); // top
+        crafted.extend_from_slice(&table.to_be_bytes()); // table
+        assert!(loads(&crafted).is_err());
     }
 
     #[test]

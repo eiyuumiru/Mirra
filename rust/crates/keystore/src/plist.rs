@@ -336,11 +336,16 @@ fn write_binary(root: &Plist) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+const MAX_PLIST_DEPTH: usize = 64;
+const MAX_PLIST_NODES: usize = 100_000;
+
 struct Reader<'a> {
     data: &'a [u8],
     offsets: Vec<u64>,
     ref_size: usize,
     active: Vec<bool>,
+    depth: usize,
+    nodes: usize,
 }
 
 fn read_uint(bytes: &[u8]) -> u64 {
@@ -370,6 +375,10 @@ impl Reader<'_> {
     }
 
     fn object(&mut self, reference: usize) -> Result<Plist> {
+        self.nodes = self.nodes.checked_add(1).ok_or_else(invalid)?;
+        if self.nodes > MAX_PLIST_NODES || self.depth >= MAX_PLIST_DEPTH {
+            return Err(invalid());
+        }
         let offset = *self.offsets.get(reference).ok_or_else(invalid)? as usize;
         if self.active[reference] {
             return Err(invalid()); // A cycle cannot be represented as a tree.
@@ -390,7 +399,11 @@ impl Reader<'_> {
                 if !micros.is_finite() || micros.abs() > 9.0e18 {
                     return Err(invalid());
                 }
-                Plist::Date(micros as i64)
+                let micros = micros as i64;
+                if epoch().checked_add_signed(chrono::Duration::microseconds(micros)).is_none() {
+                    return Err(invalid());
+                }
+                Plist::Date(micros)
             }
             _ if high == 0x10 => {
                 let width = 1usize << low;
@@ -425,20 +438,29 @@ impl Reader<'_> {
                 let units: Vec<u16> = bytes.chunks(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
                 Plist::String(String::from_utf16(&units).map_err(|_| invalid())?)
             }
-            _ if high == 0x80 => Plist::Uid(read_uint(self.slice(at, 1 + low as usize)?)),
+            _ if high == 0x80 => {
+                let width = 1 + low as usize;
+                if width > 8 {
+                    return Err(invalid());
+                }
+                Plist::Uid(read_uint(self.slice(at, width)?))
+            }
             _ if high == 0xA0 => {
                 let size = self.size(low, &mut at)?;
                 let refs = self.refs(at, size)?;
                 self.active[reference] = true;
+                self.depth += 1;
                 let items = refs.into_iter().map(|r| self.object(r)).collect::<Result<Vec<_>>>();
+                self.depth -= 1;
                 self.active[reference] = false;
                 Plist::Array(items?)
             }
             _ if high == 0xD0 => {
                 let size = self.size(low, &mut at)?;
                 let keys = self.refs(at, size)?;
-                let values = self.refs(at + size * self.ref_size, size)?;
+                let values = self.refs(at.checked_add(size.checked_mul(self.ref_size).ok_or_else(invalid)?).ok_or_else(invalid)?, size)?;
                 self.active[reference] = true;
+                self.depth += 1;
                 let mut map = BTreeMap::new();
                 let mut result = Ok(());
                 for (k, v) in keys.into_iter().zip(values) {
@@ -457,6 +479,7 @@ impl Reader<'_> {
                         }
                     }
                 }
+                self.depth -= 1;
                 self.active[reference] = false;
                 result?;
                 Plist::Dict(map)
@@ -481,10 +504,10 @@ fn read_binary(data: &[u8]) -> Result<Plist> {
         return Err(invalid());
     }
     let start = table as usize;
-    let end = start.checked_add(count as usize * offset_size).ok_or_else(invalid)?;
+    let end = start.checked_add((count as usize).checked_mul(offset_size).ok_or_else(invalid)?).ok_or_else(invalid)?;
     let bytes = data.get(start..end).ok_or_else(invalid)?;
     let offsets = bytes.chunks(offset_size).map(read_uint).collect();
-    let mut reader = Reader { data, offsets, ref_size, active: vec![false; count as usize] };
+    let mut reader = Reader { data, offsets, ref_size, active: vec![false; count as usize], depth: 0, nodes: 0 };
     reader.object(top as usize)
 }
 
@@ -497,7 +520,7 @@ fn epoch() -> NaiveDateTime {
 }
 
 fn date_text(micros: i64) -> String {
-    let moment = epoch() + chrono::Duration::microseconds(micros);
+    let moment = epoch().checked_add_signed(chrono::Duration::microseconds(micros)).unwrap_or_else(epoch);
     format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", moment.year(), moment.month(), moment.day(),
         moment.hour(), moment.minute(), moment.second())
 }
@@ -681,13 +704,16 @@ fn parse_int(raw: &str) -> Result<i128> {
         Some(rest) => (true, rest),
         None => (false, text.strip_prefix('+').unwrap_or(text)),
     };
+    if body.starts_with('+') || body.starts_with('-') {
+        return Err(bad());
+    }
     let (radix, digits) = match body.strip_prefix("0x").or_else(|| body.strip_prefix("0X")) {
         Some(hex) if raw.starts_with("0x") || raw.starts_with("0X") => (16, hex),
         _ => (10, body),
     };
     let digits = digits.replace('_', "");
     let value = i128::from_str_radix(&digits, radix).map_err(|_| bad())?;
-    Ok(if negative { -value } else { value })
+    if negative { value.checked_neg().ok_or_else(bad) } else { Ok(value) }
 }
 
 impl XmlReader<'_> {

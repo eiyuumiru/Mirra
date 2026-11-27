@@ -176,10 +176,27 @@ class OnboardingTests(unittest.TestCase):
 
     def test_failed_enable_preserves_ready_setup_for_retry(self):
         state = self.authorize_stage(); saved = self.wizard.load(); saved['phase'] = 'ready'; self.wizard.save(saved)
-        _, access, ready = self.wizard.paths(state['id']); write_state(ready, load_config(access).as_dict())
+        _, access, ready = self.wizard.paths(state['id'])
+        config = load_config(access)
+        config.certificate_file.write_bytes(b'fixture-certificate')
+        config.token_file.write_text('ABCDEFGHJKMNPQRSTVWXYZ12\n')
+        write_state(ready, config.as_dict())
         with patch.object(self.service, 'stop', side_effect=RuntimeError('Cleanup still running')), \
                 patch.object(self.service, 'prepare') as prepare:
             with self.assertRaises(RuntimeError): self.wizard.finish(state['id'])
+            prepare.assert_not_called()
+        self.assertEqual(self.wizard.load()['phase'], 'ready')
+
+    def test_finish_validates_credentials_before_stopping_support(self):
+        state = self.authorize_stage(); saved = self.wizard.load(); saved['phase'] = 'ready'; self.wizard.save(saved)
+        _, access, ready = self.wizard.paths(state['id'])
+        config = load_config(access)
+        write_state(ready, config.as_dict())  # Missing token_file and certificate_file on disk.
+        with patch.object(self.service, 'stop') as stop, \
+                patch.object(self.service, 'prepare') as prepare:
+            with self.assertRaisesRegex(RuntimeError, 'token_file|certificate_file'):
+                self.wizard.finish(state['id'])
+            stop.assert_not_called()
             prepare.assert_not_called()
         self.assertEqual(self.wizard.load()['phase'], 'ready')
 

@@ -114,9 +114,15 @@ def observe(service=None, *, timeout=2):
                       'Some installed files are missing or changed. Keep the existing diagnostics and use the setup guide to repair the package.',
                       actions=('guide', 'refresh'))
     try:
-        configuration = load_config(service.package / 'config.json')
+        config_path = service.package / 'config.json'
+        configuration = load_config(config_path)
         transport = configuration.transport
         if service.needs_update(manifest):
+            saved = json.loads(config_path.read_text())
+            if not saved.get('backend', {}).get('service', {}).get('token_file'):
+                return report('setup_required', 'Pair with Mirra Bridge',
+                              'This older SSH installation needs Mirra Bridge service pairing before updating. Open Setup to pair your iPhone; existing support stays preserved until setup finishes.',
+                              actions=('setup', 'guide'), transport=transport)
             return report('update_available', 'Update Mirra support',
                           'Choose Update and connect to install this version’s support using your saved bridge setup.',
                           actions=('install', 'guide'), transport=transport)

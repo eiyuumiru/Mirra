@@ -167,12 +167,12 @@ impl Parser<'_> {
             out.push_str(&rest[..stop]);
             self.i += stop;
             if self.rest().starts_with("<!--") {
-                let found = self.rest().find("-->").ok_or_else(invalid)?;
-                self.i += found + 3;
+                let found = self.rest()[4..].find("-->").ok_or_else(invalid)?;
+                self.i += 4 + found + 3;
             } else if self.rest().starts_with("<![CDATA[") {
-                let found = self.rest().find("]]>").ok_or_else(invalid)?;
-                out.push_str(&self.rest()[9..found]);
-                self.i += found + 3;
+                let found = self.rest()[9..].find("]]>").ok_or_else(invalid)?;
+                out.push_str(&self.rest()[9..9 + found]);
+                self.i += 9 + found + 3;
             } else if self.rest().starts_with('&') {
                 let end = self.rest().find(';').ok_or_else(invalid)?;
                 let entity = &self.rest()[1..end];
@@ -203,6 +203,13 @@ impl Parser<'_> {
     }
 
     fn value(&mut self) -> Result<Value, Error> {
+        self.value_at(0)
+    }
+
+    fn value_at(&mut self, depth: usize) -> Result<Value, Error> {
+        if depth >= 64 {
+            return Err(invalid());
+        }
         let tag = self.open()?;
         let name = tag.name.as_str();
         match name {
@@ -230,7 +237,7 @@ impl Parser<'_> {
                     }
                     let key = if key.empty { String::new() } else { self.text("key")? };
                     self.misc()?;
-                    let value = self.value()?;
+                    let value = self.value_at(depth + 1)?;
                     map.insert(key, value);
                 }
             }
@@ -245,7 +252,7 @@ impl Parser<'_> {
                         self.close("array")?;
                         return Ok(Value::Array(items));
                     }
-                    items.push(self.value()?);
+                    items.push(self.value_at(depth + 1)?);
                 }
             }
             "string" | "integer" | "real" | "data" | "date" => {

@@ -74,6 +74,9 @@ PAIRING_BACKUP = STATE / "pairing.plist"
 BROKER_FILE = STATE / "broker.json"
 # A detached sharingd outlives this workspace, so its output goes to a stable file.
 LOGS = Path.home() / "Library/Application Support/Mirra/logs"
+LOGS.mkdir(mode=0o700, parents=True, exist_ok=True)
+if LOGS.stat().st_uid != os.getuid() or LOGS.stat().st_mode & 0o077:
+    raise SystemExit("Mirra log directory must be private")
 SHARINGD_LOGS = {1: LOGS / "sharingd.stdout.log", 2: LOGS / "sharingd.log"}
 
 
@@ -184,7 +187,7 @@ finally:
             except (OSError, RuntimeError) as error:
                 emit_event({"BROKER_FILE_FAILED": str(error)})
             # Only a normal stop of the long-running service keeps the adapter.
-            detach = stop.is_set() and duration is None and not failed
+            detach = stop.is_set() and duration is None and not failed and log_limits.error is None
             state = agent.close(detach=detach)
             emit_event({"SHARINGD_DETACHED" if detach else "ORIGINAL_RESTORED": state})
     finally:

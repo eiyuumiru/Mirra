@@ -419,14 +419,21 @@ impl Shared {
         let mut requested_stop = false;
         let mut reader = Some(reader);
         let mut chunk = vec![0u8; 16384];
+        let mut stop_deadline: Option<Instant> = None;
         while process.poll().is_none() || reader.is_some() {
             if (self.stop.is_set() || (ready_at.is_none() && Instant::now() > deadline)) && !requested_stop {
                 if process.poll().is_none() {
                     process.terminate();
                 }
                 requested_stop = true;
+                stop_deadline = Some(Instant::now() + self.hooks.worker_stop);
                 let reason = if self.stop.is_set() { "requested stop" } else { "backend readiness deadline" };
                 self.publish("stopping_worker", vec![("reason", json!(reason))])?;
+            }
+            if let Some(limit) = stop_deadline {
+                if Instant::now() >= limit {
+                    break;
+                }
             }
             let Some(fd) = reader.as_ref().map(AsRawFd::as_raw_fd) else {
                 std::thread::sleep(Duration::from_millis(200));
@@ -469,10 +476,16 @@ impl Shared {
                 buffered.clear(); // Invalid oversized diagnostic line, never a state event.
             }
         }
-        let code = loop {
-            if let Some(code) = process.wait(Duration::from_secs(3600)) {
-                break code;
+        let code = match stop_deadline {
+            Some(limit) => {
+                let left = limit.saturating_duration_since(Instant::now());
+                process.wait(left).ok_or_else(|| crate::error::Error::runtime("Backend restoration worker has not stopped"))?
             }
+            None => loop {
+                if let Some(code) = process.wait(Duration::from_secs(3600)) {
+                    break code;
+                }
+            },
         };
         Ok((code, ready_at.map_or(0.0, |at| at.elapsed().as_secs_f64())))
     }

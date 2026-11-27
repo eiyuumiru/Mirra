@@ -273,10 +273,23 @@ fn recovery_requires_a_live_recorded_sharingd_identity() {
 #[test]
 fn legacy_package_offers_update_without_reading_status() {
     let f = Fixture::new();
+    write_state(&f.service.package.join("config.json"), &json!({
+        "backend": {"transport": "ssh", "service": {"token_file": util::text(&f.service.package.join("private/token"))}}
+    })).unwrap();
     *f.service.manifest.lock().unwrap() = Ok(object(json!({"schema_version": 4})));
     let result = f.observe();
     assert_eq!(result["state"], "update_available");
     assert_eq!(result["actions"], json!(["install", "guide"]));
+    assert_eq!(*f.service.status_calls.lock().unwrap(), 0);
+}
+
+#[test]
+fn ssh_era_legacy_package_directs_user_to_setup_instead_of_install() {
+    let f = Fixture::new();
+    *f.service.manifest.lock().unwrap() = Ok(object(json!({"schema_version": 4})));
+    let result = f.observe();
+    assert_eq!(result["state"], "setup_required");
+    assert_eq!(result["actions"], json!(["setup", "guide"]));
     assert_eq!(*f.service.status_calls.lock().unwrap(), 0);
 }
 
